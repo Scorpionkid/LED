@@ -1,0 +1,4 @@
+network_d:
+  type: MultiScaleVGGFreqDiscriminator
+  in_channels: 4
+  use_pretrained_vgg: true

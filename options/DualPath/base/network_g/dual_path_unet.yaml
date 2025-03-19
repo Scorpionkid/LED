@@ -1,0 +1,9 @@
+# network structures
+network_g:
+  type: DualPathUNet
+  in_channels: 4
+  out_channels: 4
+  base_channels: 64
+  dilated_rates: [1, 2, 4, 8]
+  use_wavelet_upsample: true
+  use_sharpness_recovery: true
