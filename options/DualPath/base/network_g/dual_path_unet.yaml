@@ -1,4 +1,3 @@
-# network structures
 network_g:
   type: DualPathUNet
   in_channels: 4

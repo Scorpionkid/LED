@@ -10,7 +10,6 @@ scale: 1
 num_gpu: 1
 manual_seed: 2022
 
-# 训练设置
 train:
   # 数据加载器
   datasets:

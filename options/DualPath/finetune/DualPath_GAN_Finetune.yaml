@@ -1,0 +1,109 @@
+base:
+- options/base/dataset/finetune/SID_SonyA7S2_fewshot_raw_pair6.yaml
+- options/base/dataset/test/SID_SonyA7S2_val_split.yaml
+- options/DualPath/base/network_g/dual_path_unet.yaml
+- options/DualPath/base/network_d/vgg_freq_disc.yaml
+- options/base/val_and_logger.yaml
+
+name: DualPath_GAN_Finetune_SID_SonyA7S2
+model_type: DualPathGANModel
+scale: 1
+num_gpu: 1
+manual_seed: 2022
+
+# 训练设置
+train:
+  # 数据加载器
+  datasets:
+    train:
+      num_worker_per_gpu: 6
+      batch_size_per_gpu: 1
+      dataset_enlarge_ratio: 50
+      prefetch_mode: ~
+
+  # 生成器优化器
+  optim_g:
+    type: Adam
+    lr: !!float 2e-5
+    weight_decay: 0
+    betas: [0.9, 0.999]
+
+  # 判别器优化器
+  optim_d:
+    type: Adam
+    lr: !!float 1e-5
+    weight_decay: 0
+    betas: [0.9, 0.999]
+
+  # 学习率调度器
+  scheduler:
+    type: CosineAnnealingRestartLR
+    periods: [1500]
+    restart_weights: [1]
+    eta_min: !!float 1e-7
+
+  # 迭代次数设置
+  total_iter: 1500
+  warmup_iter: 150
+
+  # GAN训练参数
+  net_d_iters: 1  # 每次生成器迭代的判别器迭代次数
+  net_d_start_iter: 300  # 开始GAN训练的迭代次数
+  gan_weight: 0.005  # 对抗损失的权重
+
+  # 损失函数
+  pixel_opt:
+    type: L1Loss
+    loss_weight: 1.0
+    reduction: mean
+
+  # 感知损失
+  perceptual_opt:
+    type: VGGPerceptualLoss
+    layer_weights:
+      conv3_4: 0.1
+      conv4_4: 0.1
+    vgg_type: vgg19
+    loss_weight: 0.05
+
+  # 梯度损失
+  gradient_opt:
+    type: GradientLoss
+    loss_weight: 0.1
+
+  # GAN损失
+  gan_opt:
+    type: GANLoss
+    gan_type: wgan_gp
+    real_label_val: 1.0
+    fake_label_val: 0.0
+    loss_weight: 1.0
+
+# 路径设置
+path:
+  # 从预训练模型加载权重
+  pretrain_network_g: pretrained/models/DualPath_GAN_Training/net_g_latest.pth
+  strict_load_g: true
+  pretrain_network_d: pretrained/models/DualPath_GAN_Training/net_d_latest.pth
+  strict_load_d: true
+  resume_state: ~
+  CRF: datasets/EMoR  # Camera Response Function路径
+
+# 验证设置
+val:
+  val_freq: !!float 150
+  save_img: true
+  illumination_correct: true  # 是否使用光照校正
+  metrics:
+    psnr:
+      type: calculate_psnr
+      crop_border: 2
+      test_y_channel: false
+    ssim:
+      type: calculate_ssim
+      crop_border: 2
+      test_y_channel: false
+
+# 日志设置
+logger:
+  save_checkpoint_freq: !!float 300

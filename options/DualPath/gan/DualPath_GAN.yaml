@@ -1,0 +1,89 @@
+base:
+- options/base/dataset/pretrain/SID_raw_gt.yaml                 # train dataset
+- options/base/dataset/test/SID_SonyA7S2_val_split.yaml         # test dataset
+- options/DualPath/base/network_g/dual_path_unet.yaml           # network_g
+- options/DualPath/base/network_d/vgg_freq_disc.yaml            # network_d
+- options/base/val_and_logger.yaml                              # val + logger
+
+name: DualPath_GAN_Training
+model_type: DualPathGANModel
+scale: 1
+num_gpu: 1
+manual_seed: 2022
+
+# training settings
+train:
+  optim_g:
+    type: Adam
+    lr: !!float 1e-4
+    weight_decay: 0
+    betas: [0.9, 0.999]
+
+  optim_d:
+    type: Adam
+    lr: !!float 5e-5
+    weight_decay: 0
+    betas: [0.9, 0.999]
+
+  scheduler:
+    type: CosineAnnealingRestartLR
+    periods: [200000]
+    restart_weights: [1]
+    eta_min: !!float 1e-7
+
+  total_iter: 200000
+  warmup_iter: 5000  # warm up period
+
+  # GAN training parameters
+  net_d_iters: 1  # number of discriminator iterations per generator iteration
+  net_d_start_iter: 50000  # start GAN training after this many iterations
+
+  gan_weight: 0.01  # weight for the adversarial loss
+
+  # losses
+  pixel_opt:
+    type: L1Loss
+    loss_weight: 1.0
+    reduction: mean
+
+  perceptual_opt:
+    type: VGGPerceptualLoss
+    layer_weights:
+      conv1_2: 0.1
+      conv2_2: 0.1
+      conv3_4: 0.1
+      conv4_4: 0.1
+      conv5_4: 0.1
+    vgg_type: vgg19
+    loss_weight: 0.1
+
+  gradient_opt:
+    type: GradientLoss
+    loss_weight: 0.5
+
+  gan_opt:
+    type: GANLoss
+    gan_type: wgan_gp
+    real_label_val: 1.0
+    fake_label_val: 0.0
+    loss_weight: 1.0
+
+path:
+  pretrain_network_g: pretrained/models/DualPath_Pretrain_Basic/net_g_latest.pth
+  strict_load_g: true
+  pretrain_network_d: ~
+  strict_load_d: true
+  resume_state: ~
+
+val:
+  val_freq: !!float 2000
+  save_img: true
+  metrics:
+    psnr:
+      type: calculate_psnr
+      crop_border: 2
+      test_y_channel: false
+    ssim:
+      type: calculate_ssim
+      crop_border: 2
+      test_y_channel: false
