@@ -1,5 +1,5 @@
 base:
-- options/base/dataset/pretrain/SID_raw_gt.yaml        # train dataset
+- options/base/dataset/pretrain/SID_train.yaml        # train dataset
 - options/base/dataset/test/SID_SonyA7S2_val_split.yaml  # test dataset
 - options/DualPath/base/network_g/dual_path_unet.yaml  # network_g
 - options/base/val_and_logger.yaml                     # val + logger

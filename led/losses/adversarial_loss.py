@@ -1,13 +1,13 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from basicsr.utils.registry import LOSS_REGISTRY
+from led.utils.registry import LOSS_REGISTRY
 
 @LOSS_REGISTRY.register()
-class GANLoss(nn.Module):
+class DualPathGANLoss(nn.Module):
     """GAN损失函数"""
     def __init__(self, gan_type='vanilla', real_label_val=1.0, fake_label_val=0.0, loss_weight=1.0):
-        super(GANLoss, self).__init__()
+        super(DualPathGANLoss, self).__init__()
         self.gan_type = gan_type
         self.real_label_val = real_label_val
         self.fake_label_val = fake_label_val
