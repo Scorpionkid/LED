@@ -70,9 +70,9 @@ class DualPathUNet(nn.Module):
         self.bottleneck = DualPathBlock(base_channels*4, base_channels*8)
 
         # decoder with skip connections
-        self.dec3 = DualPathBlock(base_channels*8+base_channels*4, base_channels*4)
-        self.dec2 = DualPathBlock(base_channels*4+base_channels*2, base_channels*2)
-        self.dec1 = DualPathBlock(base_channels*2+base_channels, base_channels)
+        self.dec3 = DualPathBlock(base_channels*4+base_channels*4, base_channels*4)
+        self.dec2 = DualPathBlock(base_channels*2+base_channels*2, base_channels*2)
+        self.dec1 = DualPathBlock(base_channels+base_channels, base_channels)
 
         # downsample and upsample
         self.down = nn.MaxPool2d(2)
@@ -94,17 +94,24 @@ class DualPathUNet(nn.Module):
 
     def forward(self, x):
         # encoder
+        # [1, 4, 1024, 1024] -> [1, 64, 1024, 1024]
         enc1 = self.enc1(x)
+        # [1, 64, 1024, 1024] -> [1, 128, 512, 512]
         enc2 = self.enc2(self.down(enc1))
+        # [1, 128, 512, 512] -> [1, 256, 256, 256]
         enc3 = self.enc3(self.down(enc2))
 
         # bottleneck
+        # [1, 256, 256, 256] -> [1, 512, 128, 128]
         bottleneck = self.bottleneck(self.down(enc3))
 
         # decoder
-        dec3 = self.dec3(torch.cat([bottleneck, enc3], dim=1))
-        dec2 = self.dec2(torch.cat([dec3, enc2], dim=1))
-        dec1 = self.dec1(torch.cat([dec2, enc1], dim=1))
+        # [1, 512, 128, 128] -> [[1, 256, 256, 256]] + [1, 256, 256, 256] -> [1, 256, 256, 256]
+        dec3 = self.dec3(torch.cat([self.up3(bottleneck), enc3], dim=1))  # 使用 up3
+        # [1, 256, 256, 256] -> [1, 128, 512, 512]
+        dec2 = self.dec2(torch.cat([self.up2(dec3), enc2], dim=1))        # 使用 up2
+        # [1, 128, 512, 512] -> [1, 64, 1024, 1024]
+        dec1 = self.dec1(torch.cat([self.up1(dec2), enc1], dim=1))        # 使用 up1
 
         # final output
         out = self.final(dec1)

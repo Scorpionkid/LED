@@ -39,7 +39,7 @@ class DilatedConvChain(nn.Module):
             dilated_rates = [1, 2, 4, 8]
 
         self.dilated_convs = nn.ModuleList([
-            nn.Conv2d(channels, channels, 3, padding=r, dilation=4)
+            nn.Conv2d(channels, channels, 3, padding=r, dilation=r)
             for r in dilated_rates
         ])
         self.activation = nn.LeakyReLU(0.2, inplace=True)
@@ -58,7 +58,7 @@ class HighFrequencyAttention(nn.Module):
         self.conv_edge = nn.Conv2d(channels, channels, 3, padding=1)
 
         self.attention = nn.Sequential(
-            nn.Conv2d(channels, channels, 3, padding=1),
+            nn.Conv2d(channels * 2, channels, 3, padding=1),
             nn.Sigmoid()
         )
 
@@ -71,4 +71,3 @@ class HighFrequencyAttention(nn.Module):
         attention = self.attention(torch.cat([x, edge_feat], dim=1))
 
         return x * attention + x # Residual connection
-

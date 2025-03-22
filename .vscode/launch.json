@@ -18,5 +18,17 @@
             "cwd": "${workspaceFolder}",
             "justMyCode": false
         },
-    ]
+        {
+            "name": "DualPathNet: train.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/led/train.py",
+            "console": "integratedTerminal",
+            "args": [
+                "-opt",
+                "options/DualPath/pretrain/DualPath_Basic.yaml"
+            ],
+            "cwd": "${workspaceFolder}",
+            "justMyCode": false
+        },
 }
