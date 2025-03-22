@@ -137,7 +137,6 @@ class DualPathModel(RAWBaseModel):
         """Optimize model parameters."""
         self.optimizer_g.zero_grad()
 
-        # 初始化噪声图变量
         noise_map = None
 
         # 使用噪声生成器生成训练数据（如果有）
