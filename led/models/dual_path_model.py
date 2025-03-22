@@ -2,6 +2,7 @@ import torch
 from collections import OrderedDict
 from copy import deepcopy
 from os import path as osp
+import os
 
 from led.archs import build_network
 from led.losses import build_loss
@@ -10,6 +11,7 @@ from led.utils import get_root_logger
 from led.utils.registry import MODEL_REGISTRY
 from led.losses.perceptual_loss import VGGPerceptualLoss
 from led.losses.gradient_loss import GradientLoss
+from led.archs.dual_path_components.noise_map import generate_noise_map
 
 @MODEL_REGISTRY.register()
 class DualPathModel(RAWBaseModel):
@@ -26,6 +28,21 @@ class DualPathModel(RAWBaseModel):
         self.net_g = build_network(opt['network_g'])
         self.net_g = self.model_to_device(self.net_g)
         self.print_network(self.net_g)
+
+        # define noise_g
+        if 'noise_g' in opt:
+            self.noise_g = self.build_noise_g(opt['noise_g'])
+            self.noise_g = self.noise_g.to(self.device)
+            self.print_network(self.noise_g)
+
+            noise_g_path = self.opt['path'].get('predefined_noise_g', None)
+            if noise_g_path is not None:
+                self.load_network(self.noise_g, noise_g_path, self.opt['path'].get('strict_load_g', True), None)
+            logger = get_root_logger()
+            logger.info(f'Sampled Cameras: \n{self.noise_g.log_str}')
+
+            dump_path = os.path.join(self.opt['path']['experiments_root'], 'noise_g.pth')
+            torch.save(self.noise_g.state_dict(), dump_path)
 
         # load pretrained models
         load_path = self.opt['path'].get('pretrain_network_g', None)
@@ -79,6 +96,11 @@ class DualPathModel(RAWBaseModel):
         self.setup_optimizers()
         self.setup_schedulers()
 
+    def build_noise_g(self, opt):
+        opt = deepcopy(opt)
+        noise_g_class = eval(opt.pop('type'))
+        return noise_g_class(opt, self.device)
+
     def setup_optimizers(self):
         train_opt = self.opt['train']
         optim_params = []
@@ -115,7 +137,56 @@ class DualPathModel(RAWBaseModel):
         """Optimize model parameters."""
         self.optimizer_g.zero_grad()
 
-        self.output = self.net_g(self.lq)
+        # 初始化噪声图变量
+        noise_map = None
+
+        # 使用噪声生成器生成训练数据（如果有）
+        if hasattr(self, 'noise_g'):
+            self.camera_id = torch.randint(0, len(self.noise_g), (1,)).item()
+            with torch.no_grad():
+                scale = self.white_level - self.black_level
+                self.gt = (self.gt - self.black_level) / scale
+                self.gt, self.lq, self.curr_metadata = self.noise_g(self.gt, scale, self.ratio, self.camera_id)
+
+                # 如果网络支持噪声图，则生成噪声图
+                if hasattr(self.net_g, 'use_noise_map') and self.net_g.use_noise_map:
+                    noise_map = generate_noise_map(
+                        image=self.lq,
+                        noise_params=self.curr_metadata['noise_params'],
+                        camera_params=None,  # 不需要，因为已有噪声参数
+                        iso=None             # 不需要，因为已有噪声参数
+                    )
+
+                # 数据增强
+                if hasattr(self, 'augment') and self.augment is not None:
+                    self.gt, self.lq = self.augment(self.gt, self.lq)
+                    if noise_map is not None:
+                        # 对噪声图进行相同的增强
+                        noise_map = self.augment(noise_map)[0]
+
+        # 如果没有噪声生成器但需要噪声图，使用ISO计算（测试时或特定场景）
+        elif hasattr(self.net_g, 'use_noise_map') and self.net_g.use_noise_map and hasattr(self, 'iso') and self.iso is not None:
+            # 获取相机参数（如果有）
+            camera_params = None
+            camera_name = None
+            if hasattr(self, 'camera_params'):
+                camera_params = self.camera_params
+                camera_name = getattr(self, 'camera_name', None)
+
+            # 生成噪声图
+            noise_map = generate_noise_map(
+                image=self.lq,
+                noise_params=None,
+                camera_params=camera_params,
+                iso=self.iso,
+                camera_name=camera_name
+            )
+
+        # 使用噪声图（如果有）进行推理
+        if noise_map is not None and hasattr(self.net_g, 'use_noise_map') and self.net_g.use_noise_map:
+            self.output = self.net_g(self.lq, noise_map)
+        else:
+            self.output = self.net_g(self.lq)
 
         l_total = 0
         loss_dict = OrderedDict()

@@ -41,6 +41,21 @@ class DualPathGANModel(DualPathModel):
                 self.net_d, load_path, self.opt['path'].get('strict_load_d', True), param_key
             )
 
+        # define noise_g
+        if 'noise_g' in opt:
+            self.noise_g = self.build_noise_g(opt['noise_g'])
+            self.noise_g = self.noise_g.to(self.device)
+            self.print_network(self.noise_g)
+
+            noise_g_path = self.opt['path'].get('predefined_noise_g', None)
+            if noise_g_path is not None:
+                self.load_network(self.noise_g, noise_g_path, self.opt['path'].get('strict_load_g', True), None)
+            logger = get_root_logger()
+            logger.info(f'Sampled Cameras: \n{self.noise_g.log_str}')
+
+            dump_path = os.path.join(self.opt['path']['experiments_root'], 'noise_g.pth')
+            torch.save(self.noise_g.state_dict(), dump_path)
+
         # Set up discriminator optimizer
         if self.opt['train'].get('optim_d'):
             optim_d_params = []
@@ -65,10 +80,25 @@ class DualPathGANModel(DualPathModel):
         self.net_d_iters = train_opt.get('net_d_iters', 1)
         self.net_d_start_iter = train_opt.get('net_d_start_iter', 0)
 
+    def build_noise_g(self, opt):
+        opt = deepcopy(opt)
+        noise_g_class = eval(opt.pop('type'))
+        return noise_g_class(opt, self.device)
+
     def optimize_parameters(self, current_iter):
         """Optimize model parameters for one iteration."""
         # Generate denoised output
         self.output = self.net_g(self.lq)
+
+        # noise generation
+        if hasattr(self, 'noise_g'):
+            self.camera_id = torch.randint(0, len(self.noise_g), (1,)).item()
+            with torch.no_grad():
+                scale = self.white_level - self.black_level
+                self.gt = (self.gt - self.black_level) / scale
+                self.gt, self.lq, self.curr_metadata = self.noise_g(self.gt, scale, self.ratio, self.camera_id)
+                if hasattr(self, 'augment') and self.augment is not None:
+                    self.gt, self.lq = self.augment(self.gt, self.lq)
 
         # Optimize discriminator (if GAN training is active)
         if current_iter >= self.net_d_start_iter:

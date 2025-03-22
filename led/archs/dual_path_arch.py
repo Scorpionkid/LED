@@ -55,14 +55,17 @@ class DualPathUNet(nn.Module):
     """double path U-Net, apply double path design on each scale of U-Net"""
     def __init__(self, in_channels=4, out_channels=4, base_channels=64,
                  dilated_rates=None, use_wavelet_upsample=True,
-                 use_sharpness_recovery=True):
+                 use_sharpness_recovery=True, use_noise_map=False):
         super(DualPathUNet, self).__init__()
 
+        self.use_noise_map = use_noise_map
         self.use_wavelet_upsample = use_wavelet_upsample
         self.use_sharpness_recovery = use_sharpness_recovery
 
+        enc1_in_channels = in_channels * 2 if use_noise_map else in_channels
+
         # encoder
-        self.enc1 = DualPathBlock(in_channels, base_channels)
+        self.enc1 = DualPathBlock(enc1_in_channels, base_channels)
         self.enc2 = DualPathBlock(base_channels, base_channels*2)
         self.enc3 = DualPathBlock(base_channels*2, base_channels*4)
 
@@ -90,12 +93,17 @@ class DualPathUNet(nn.Module):
 
         # sharpness recovery
         if use_sharpness_recovery:
-            self.sharpness_recovery = SharpnessRecovery(out_channels)
+            self.sharpness_recovery = SharpnessRecovery(out_channels, use_noise_map)
 
-    def forward(self, x):
+    def forward(self, x, noise_map=None):
+        # concatenate noise map if needed
+        if self.use_noise_map and noise_map is not None:
+            x_input = torch.cat([x, noise_map], dim=1)
+        else:
+            x_input = x
         # encoder
-        # [1, 4, 1024, 1024] -> [1, 64, 1024, 1024]
-        enc1 = self.enc1(x)
+        # [1, 4/8, 1024, 1024] -> [1, 64, 1024, 1024]
+        enc1 = self.enc1(x_input)
         # [1, 64, 1024, 1024] -> [1, 128, 512, 512]
         enc2 = self.enc2(self.down(enc1))
         # [1, 128, 512, 512] -> [1, 256, 256, 256]
@@ -118,6 +126,6 @@ class DualPathUNet(nn.Module):
 
         # sharpness recovery
         if self.use_sharpness_recovery:
-            out = self.sharpness_recovery(out)
+            out = self.sharpness_recovery(out, noise_map)
 
         return out

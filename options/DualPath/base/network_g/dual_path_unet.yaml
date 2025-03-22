@@ -6,3 +6,4 @@ network_g:
   dilated_rates: [1, 2, 4, 8]
   use_wavelet_upsample: true
   use_sharpness_recovery: true
+  use_noise_map: true

@@ -1,17 +1,38 @@
 base:
-- options/base/dataset/pretrain/SID_train.yaml        # train dataset
-- options/base/dataset/test/SID_SonyA7S2_val_split.yaml  # test dataset
-- options/DualPath/base/network_g/dual_path_unet.yaml  # network_g
-- options/base/val_and_logger.yaml                     # val + logger
+- options/base/dataset/pretrain/SID_raw_gt.yaml
+- options/base/dataset/test/SID_SonyA7S2_val_split.yaml
+- options/DualPath/base/network_g/dual_path_unet.yaml
+- options/base/noise_g/noise_g_virtual.yaml
+# - options/base/pretrain/CVPR20_ELD.yaml
+- options/base/val_and_logger.yaml
 
-name: DualPath_Pretrain_Basic
-model_type: DualPathModel
+name: DualPath_LED_VirtualNoise
+model_type: DualPathVirtualNoiseModel
 scale: 1
 num_gpu: 1
 manual_seed: 2022
 
-network_g:
-  use_noise_map: true
+path:
+  pretrain_network_g: ~
+  predefined_noise_g: ~
+  strict_load_g: true
+  resume_state: ~
+  CRF: datasets/EMoR
+
+val:
+  val_freq: !!float 2000
+  save_img: true
+  metrics:
+    psnr:
+      type: calculate_psnr
+      crop_border: 2
+      test_y_channel: false
+    ssim:
+      type: calculate_ssim
+      crop_border: 2
+      test_y_channel: false
+  illumination_correct: true
+
 
 # training settings
 datasets:
@@ -57,22 +78,3 @@ train:
   gradient_opt:
     type: GradientLoss
     loss_weight: 0.5
-
-path:
-  pretrain_network_g: ~
-  strict_load_g: true
-  resume_state: ~
-
-val:
-  val_freq: !!float 2000
-  save_img: true
-  metrics:
-    psnr:
-      type: calculate_psnr
-      crop_border: 2
-      test_y_channel: false
-    ssim:
-      type: calculate_ssim
-      crop_border: 2
-      test_y_channel: false
-  illumination_correct: true

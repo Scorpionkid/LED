@@ -47,21 +47,24 @@ class AdaptiveUnsharpMask(nn.Module):
 
         return sharpened
 
+
 class SharpnessRecovery(nn.Module):
-    """Noise-aware sharpness recovery module"""
-    def __init__(self, in_channels=4):
+    def __init__(self, in_channels=4, use_noise_map=False):
         super(SharpnessRecovery, self).__init__()
-        self.noise_estimator = NoiseLevelNetwork(in_channels)
+        self.use_noise_map = use_noise_map
+        if not use_noise_map:
+            self.noise_estimator = NoiseLevelNetwork(in_channels)
         self.adaptive_sharp = AdaptiveUnsharpMask(in_channels)
 
-    def forward(self, x):
-        # Estimate noise level
-        noise_map = self.noise_estimator(x)
+    def forward(self, x, noise_map=None):
+
+        if self.use_noise_map and noise_map is not None:
+            noise_level = noise_map.mean(dim=1, keepdim=True)
+        else:
+            noise_level = self.noise_estimator(x)
 
         # Generate sharpness mask
         # sharpen in low noise regions, keep in high noise regions
-        sharp_mask = 1 - noise_map
-
+        sharp_mask = 1 - noise_level
         sharpened = self.adaptive_sharp(x)
-
         return sharpened * sharp_mask + x * (1 - sharp_mask)
