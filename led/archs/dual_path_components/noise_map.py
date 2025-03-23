@@ -18,6 +18,7 @@ def generate_noise_map(image, noise_params=None, camera_params=None, iso=None, c
     # Method 1: Use noise parameters directly from noise generator (preferred method)
     if noise_params is not None and 'shot' in noise_params:
         # Get noise parameters
+        #TODOK应该是总增益，而不是单个增益？
         K = noise_params['shot']  # Corresponds to shot noise parameter K
         if 'read' in noise_params:
             sigma_r = noise_params['read'] if isinstance(noise_params['read'], torch.Tensor) else noise_params['read']['sigma']
