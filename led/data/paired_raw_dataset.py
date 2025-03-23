@@ -30,14 +30,27 @@ class PairedRAWDataset(data.Dataset):
         # assert self.postfix == 'npz'
 
         self.lq_paths, self.gt_paths, self.ratios = [], [], []
+        self.iso_values = []
         with open(opt['data_pair_list'], 'r') as data_pair_list:
             pairs = data_pair_list.readlines()
             for pair in pairs:
-                lq, gt = pair.split(' ')[:2]
+                parts = pair.split(' ')
+                lq, gt = parts[:2]
                 gt = gt.rstrip('\n')
                 shutter_lq = float(re.search(r'_(\d+(\.\d+)?)s.', lq).group(0)[1:-2])
                 shutter_gt = float(re.search(r'_(\d+(\.\d+)?)s.', gt).group(0)[1:-2])
                 ratio = min(shutter_gt / shutter_lq, 300)
+
+                # iso extraction
+                #TODO 非空检查
+                if len(parts) > 2:
+                    for part in parts[2:]:
+                        if part.startswith('ISO'):
+                            iso = int(part[3:])
+                            self.iso_values.append(iso)
+                            break
+
+
                 if not self.use_patches:
                     self.lq_paths.append(osp.join(self.root_folder, lq))
                     self.gt_paths.append(osp.join(self.root_folder, gt))
@@ -112,6 +125,7 @@ class PairedRAWDataset(data.Dataset):
         lq_path = self.lq_paths[index]
         gt_path = self.gt_paths[index]
         ratio = self.ratios[index]
+        iso = self.iso_values[index]
 
         if self.postfix is not None:
             lq_path = '.'.join([lq_path, self.postfix])
@@ -171,6 +185,7 @@ class PairedRAWDataset(data.Dataset):
             'lq': lq_im_patch,
             'gt': gt_im_patch,
             'ratio': torch.tensor(ratio).float(),
+            'iso': torch.tensor(iso).float(),
             'wb': gt_wb if self.which_meta == 'gt' else lq_wb,
             'ccm': gt_ccm if self.which_meta == 'gt' else lq_ccm,
             'lq_path': lq_path,

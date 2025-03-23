@@ -44,6 +44,32 @@ class DualPathModel(RAWBaseModel):
             dump_path = os.path.join(self.opt['path']['experiments_root'], 'noise_g.pth')
             torch.save(self.noise_g.state_dict(), dump_path)
 
+        # camera_params
+        if 'camera_params' in opt:
+            # 直接提供的相机参数
+            self.camera_params = opt['camera_params']
+            self.camera_name = opt.get('camera_name', None)
+
+        elif 'noise_g' in opt:
+            # 从噪声生成器获取相机参数
+            self.noise_g = self.build_noise_g(opt['noise_g'])
+
+            # 检查噪声生成器类型，对不同类型进行不同处理
+            if hasattr(self.noise_g, 'camera_params'):
+                # CalibratedNoisyPairGenerator
+                self.camera_params = self.noise_g.camera_params
+                if len(self.camera_params) == 1:
+                    self.camera_name = list(self.camera_params.keys())[0]
+                else:
+                    self.camera_name = opt.get('camera_name', None)
+
+            elif hasattr(self.noise_g, 'virtual_camera_count'):
+                # VirtualNoisyPairGenerator
+                self.camera_params = self.noise_g.json_dict
+                # 默认使用第一个虚拟相机
+                #TODO使用实际加噪相机
+                self.camera_name = opt.get('camera_name', 'IC0')
+
         # load pretrained models
         load_path = self.opt['path'].get('pretrain_network_g', None)
         if load_path is not None:
@@ -129,6 +155,8 @@ class DualPathModel(RAWBaseModel):
             self.wb = data['wb'].to(self.device)
         if 'ratio' in data:
             self.ratio = data['ratio'].to(self.device)
+        if 'iso' in data:
+            self.iso = data['iso'].to(self.device)
         if 'black_level' in data:
             self.black_level = data['black_level'].to(self.device)
             self.white_level = data['white_level'].to(self.device)
@@ -139,13 +167,16 @@ class DualPathModel(RAWBaseModel):
 
         noise_map = None
 
-        # 使用噪声生成器生成训练数据（如果有）
+        # 使用虚拟噪声生成器生成训练数据（如果有）
         if hasattr(self, 'noise_g'):
             self.camera_id = torch.randint(0, len(self.noise_g), (1,)).item()
             with torch.no_grad():
                 scale = self.white_level - self.black_level
                 self.gt = (self.gt - self.black_level) / scale
                 self.gt, self.lq, self.curr_metadata = self.noise_g(self.gt, scale, self.ratio, self.camera_id)
+
+                if 'cam' in self.curr_metadata:
+                    self.camera_name = self.curr_metadata['cam']
 
                 # 如果网络支持噪声图，则生成噪声图
                 if hasattr(self.net_g, 'use_noise_map') and self.net_g.use_noise_map:
@@ -165,20 +196,12 @@ class DualPathModel(RAWBaseModel):
 
         # 如果没有噪声生成器但需要噪声图，使用ISO计算（测试时或特定场景）
         elif hasattr(self.net_g, 'use_noise_map') and self.net_g.use_noise_map and hasattr(self, 'iso') and self.iso is not None:
-            # 获取相机参数（如果有）
-            camera_params = None
-            camera_name = None
-            if hasattr(self, 'camera_params'):
-                camera_params = self.camera_params
-                camera_name = getattr(self, 'camera_name', None)
-
-            # 生成噪声图
             noise_map = generate_noise_map(
                 image=self.lq,
                 noise_params=None,
-                camera_params=camera_params,
+                camera_params=getattr(self, 'camera_params', None),
                 iso=self.iso,
-                camera_name=camera_name
+                camera_name=getattr(self, 'camera_name', None)
             )
 
         # 使用噪声图（如果有）进行推理
