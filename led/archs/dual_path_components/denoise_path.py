@@ -4,30 +4,34 @@ import torch.nn.functional as F
 
 class AdaptiveDenoiseGate(nn.Module):
     """Adaptive gating mechanism to adjust denoising strength based on local noise characteristics"""
-    def __init__(self, channels):
+    def __init__(self, channels, use_noise_map=False):
         super(AdaptiveDenoiseGate, self).__init__()
-        self.noise_est = nn.Conv2d(channels, 1, 3, padding=1)
-        self.gate = nn.Sequential(
-            nn.Conv2d(1, channels//2, 3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(channels//2, channels, 3, padding=1),
-            nn.Sigmoid()
-        )
+        self.use_noise_map = use_noise_map
 
-    def forward(self, x, features=None):
+        if not use_noise_map:
+            self.noise_est = nn.Conv2d(channels, 1, 3, padding=1)
+            self.gate = nn.Sequential(
+                nn.Conv2d(1, channels//2, 3, padding=1),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(channels//2, channels, 3, padding=1),
+                nn.Sigmoid()
+            )
+
+    def forward(self, x, noise_map=None):
         """
         Args:
             x: input features
-            features: optional additional features for estimating noise level
+            noise_map: optional
         """
-        if features is None:
-            features = x
-
         # Estimate noise level
-        noise_level = self.noise_est(features)
+        if self.use_noise_map and noise_map is not None:
+            denoise_strength = torch.sigmoid(5.0 * noise_map)
 
-        # Generate denoising strength gate
-        denoise_strength = self.gate(noise_level)
+            if denoise_strength.size(1) == 1 and x.size(1) > 1:
+                denoise_strength = denoise_strength.repeat(1, x.size(1), 1, 1)
+        else:
+            estimated_noise = self.noise_est(x)
+            denoise_strength = self.gate(estimated_noise)
 
         return denoise_strength
 

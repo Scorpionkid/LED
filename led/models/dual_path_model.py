@@ -241,16 +241,33 @@ class DualPathModel(RAWBaseModel):
 
     def test(self):
         """Forward function used in testing."""
+        noise_map = None
+        if hasattr(self.net_g, 'use_noise_map') and self.net_g.use_noise_map and hasattr(self, 'iso') and self.iso is not None:
+            noise_map = generate_noise_map(
+                image=self.lq,
+                noise_params=None,
+                camera_params=getattr(self, 'camera_params', None),
+                iso=self.iso,
+                camera_name=getattr(self, 'camera_name', None)
+            )
         if hasattr(self, 'net_g_ema'):
             self.net_g_ema.eval()
             with torch.no_grad():
-                self.output = self.net_g_ema(self.lq)
+                if noise_map is not None and hasattr(self.net_g_ema, 'use_noise_map') and self.net_g_ema.use_noise_map:
+                    self.output = self.net_g_ema(self.lq, noise_map)
+                else:
+                    self.output = self.net_g_ema(self.lq)
+
                 if self.corrector is not None:
                     self.output = self.corrector(self.output, self.gt)
         else:
             self.net_g.eval()
             with torch.no_grad():
-                self.output = self.net_g(self.lq)
+                if noise_map is not None and hasattr(self.net_g, 'use_noise_map') and self.net_g.use_noise_map:
+                    self.output = self.net_g(self.lq, noise_map)
+                else:
+                    self.output = self.net_g(self.lq)
+
                 if self.corrector is not None:
                     self.output = self.corrector(self.output, self.gt)
             self.net_g.train()

@@ -52,22 +52,30 @@ class DilatedConvChain(nn.Module):
 
 class HighFrequencyAttention(nn.Module):
     # High-frequency attention module, focusing on edge and texture information in the image
-    def __init__(self, channels):
+    def __init__(self, channels, use_noise_map=False):
         super(HighFrequencyAttention, self).__init__()
         self.edge_detector = SobelFilter()
         self.conv_edge = nn.Conv2d(channels, channels, 3, padding=1)
+        self.use_noise_map = use_noise_map
 
         self.attention = nn.Sequential(
             nn.Conv2d(channels * 2, channels, 3, padding=1),
             nn.Sigmoid()
         )
 
-    def forward(self, x):
+    def forward(self, x, noise_map = None):
         # Edge detection
         edge_map = self.edge_detector(x)
         edge_feat = self.conv_edge(edge_map)
 
-        # Attention mechanism
+        # base attention
         attention = self.attention(torch.cat([x, edge_feat], dim=1))
+
+        # # Directly use the noise map to correct the attention.
+        # Regions with high noise should reduce edge sensitivity.
+        if self.use_noise_map and noise_map is not None:
+            # The larger the value of the noise map, the smaller the attention weight.
+            noise_weight = torch.exp(-5.0 * noise_map)  # Exponential decay function
+            attention = attention * noise_weight
 
         return x * attention + x # Residual connection

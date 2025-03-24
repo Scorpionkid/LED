@@ -59,12 +59,13 @@ class SharpnessRecovery(nn.Module):
     def forward(self, x, noise_map=None):
 
         if self.use_noise_map and noise_map is not None:
-            noise_level = noise_map.mean(dim=1, keepdim=True)
+            # Use simple inversion and cropping functions.
+            sharp_mask = torch.clamp(1.0 - noise_map * 5.0, 0.0, 1.0)
         else:
             noise_level = self.noise_estimator(x)
+            sharp_mask = 1.0 - noise_level
 
         # Generate sharpness mask
         # sharpen in low noise regions, keep in high noise regions
-        sharp_mask = 1 - noise_level
         sharpened = self.adaptive_sharp(x)
-        return sharpened * sharp_mask + x * (1 - sharp_mask)
+        return sharpened * sharp_mask + x * (1.0 - sharp_mask)
