@@ -26,7 +26,7 @@ class RAWGTDataset(data.Dataset):
         self.patch_id_max = opt.get('patch_id_max', 8)
         self.patch_tplt = opt.get('patch_tplt', '_s{:03}')
 
-        # 新增：支持从data_pair_list中读取数据对信息
+        # New：Support reading data pair information from the data_pair_list.
         self.data_pair_list = opt.get('data_pair_list', None)
 
         self.data_paths = []
@@ -34,7 +34,6 @@ class RAWGTDataset(data.Dataset):
         self.iso_values = []
 
         if self.data_pair_list is not None:
-            # 从文件列表中读取数据对
             with open(self.data_pair_list, 'r') as data_pair_list_file:
                 pairs = data_pair_list_file.readlines()
                 for pair in pairs:
@@ -45,16 +44,15 @@ class RAWGTDataset(data.Dataset):
                     lq, gt = parts[:2]
                     gt = gt.rstrip('\n')
 
-                    # 提取曝光时间并计算比率
                     try:
                         shutter_lq = float(re.search(r'_(\d+(\.\d+)?)s\.', lq).group(1))
                         shutter_gt = float(re.search(r'_(\d+(\.\d+)?)s\.', gt).group(1))
                         ratio = min(shutter_gt / shutter_lq, 300)
                     except:
-                        # 如果无法提取曝光时间，使用默认比率范围
+                        # If the exposure time cannot be extracted, use the default ratio range.
                         ratio = torch.randint(self.ratio_range[0], self.ratio_range[1], (1,)).item()
 
-                    # 提取ISO信息（如果有）
+                    # ISO extraction
                     iso = None
                     if len(parts) > 2:
                         for part in parts[2:]:
@@ -65,40 +63,33 @@ class RAWGTDataset(data.Dataset):
                                     pass
                                 break
 
-                    # 从GT文件路径中提取完整的文件名以供匹配
-                    # 例如：从"./long/10003_00_10s.ARW"中提取"10003_00_10s"
+                    # e.g."./long/10003_00_10s.ARW"->"10003_00_10s"
                     basename = osp.basename(gt)
-                    file_id = osp.splitext(basename)[0]  # 例如："10003_00_10s"
+                    file_id = osp.splitext(basename)[0]  # e.g.："10003_00_10s"
 
                     if self.use_patches:
-                        # 在训练集目录中查找所有匹配的patches
-                        # 格式可能是：*_00_10s_s001.npz
+                        # Find all matching patches in the training set directory.
+                        # e.g.：*_00_10s_s001.npz
                         for i in range(1, self.patch_id_max + 1):
-                            # 构建patch名称模式
+                            # patch name pattern
                             patch_suffix = self.patch_tplt.format(i)
 
-                            # 使用通配符查找匹配的文件
-                            # 使用*来匹配所有前缀，但保留特定的曝光信息（00_10s部分）
-                            exposure_part = re.search(r'_(\d+_\d+s)', file_id)
-                            if exposure_part:
-                                exposure_info = exposure_part.group(1)  # 例如："00_10s"
+                            pattern = osp.join(self.root_folder, f"{file_id}{patch_suffix}")
+                            if self.postfix:
+                                pattern += f".{self.postfix}"
 
-                                # 查找所有包含这个曝光信息和patch序号的文件
-                                pattern = osp.join(self.root_folder, f"*_{exposure_info}{patch_suffix}")
-                                if self.postfix:
-                                    pattern += f".{self.postfix}"
-
-                                matching_files = glob.glob(pattern)
-                                for patch_path in matching_files:
-                                    self.data_paths.append(patch_path)
-                                    self.ratios.append(ratio)
-                                    if iso is not None:
-                                        self.iso_values.append(iso)
+                            matching_files = glob.glob(pattern)
+                            for patch_path in matching_files:
+                                self.data_paths.append(patch_path)
+                                self.ratios.append(ratio)
+                                if iso is not None:
+                                    self.iso_values.append(iso)
         else:
-            # 原始行为：使用文件夹中的所有文件
+            # Original behavior: Use all files in the folder.
             pattern = f'*.{self.postfix}' if self.postfix else '*'
             self.data_paths = glob.glob(osp.join(self.root_folder, pattern))
 
+        self.load_in_mem = opt.get('load_in_mem', False)
         if self.load_in_mem:
             self.datas = {
                 data_path: self.depack_meta(data_path, self.postfix, True)
@@ -150,9 +141,7 @@ class RAWGTDataset(data.Dataset):
 
     def __getitem__(self, index):
         data_path = self.data_paths[index]
-        # 使用存储的ratio（如果有），否则生成随机ratio
         ratio = self.ratios[index] if index < len(self.ratios) else self.randint(*self.ratio_range)
-        # 使用存储的ISO（如果有）
         iso = self.iso_values[index] if index < len(self.iso_values) else None
 
         if not self.load_in_mem:
@@ -163,12 +152,12 @@ class RAWGTDataset(data.Dataset):
         if self.opt['crop_size'] is not None:
             _, H, W = im.shape
             crop_size = self.opt['crop_size']
-            assert crop_size < H and crop_size < W, f"裁剪尺寸 {crop_size} 超过图像尺寸 {H}x{W}"
+            assert crop_size < H and crop_size < W, f"crop size {crop_size} > img size {H}×{W}"
             if self.opt['phase'] == 'train':
                 h_start = self.randint(0, H - crop_size)
                 w_start = self.randint(0, W - crop_size)
             else:
-                # 中心裁剪
+                # center crop
                 h_start = (H - crop_size) // 2
                 w_start = (W - crop_size) // 2
             im_patch = im[:, h_start:h_start+crop_size, w_start:w_start+crop_size]
