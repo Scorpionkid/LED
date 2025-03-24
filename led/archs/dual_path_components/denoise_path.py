@@ -8,14 +8,13 @@ class AdaptiveDenoiseGate(nn.Module):
         super(AdaptiveDenoiseGate, self).__init__()
         self.use_noise_map = use_noise_map
 
-        if not use_noise_map:
-            self.noise_est = nn.Conv2d(channels, 1, 3, padding=1)
-            self.gate = nn.Sequential(
-                nn.Conv2d(1, channels//2, 3, padding=1),
-                nn.ReLU(inplace=True),
-                nn.Conv2d(channels//2, channels, 3, padding=1),
-                nn.Sigmoid()
-            )
+        self.noise_est = nn.Conv2d(channels, 1, 3, padding=1)
+        self.gate = nn.Sequential(
+            nn.Conv2d(1, channels//2, 3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(channels//2, channels, 3, padding=1),
+            nn.Sigmoid()
+        )
 
     def forward(self, x, noise_map=None):
         """

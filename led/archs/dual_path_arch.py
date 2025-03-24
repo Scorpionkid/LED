@@ -51,7 +51,7 @@ class DualPathBlock(nn.Module):
 
         #----------------------------- DETAIL PATH -----------------------------#
 
-        if isinstance(self.detail_path[-1], HighFrequencyAttention) and self.use_noise_map:
+        if isinstance(self.detail_path[-1], HighFrequencyAttention) and self.use_noise_map and noise_map is not None:
             detail = self.detail_path[0](feat)
             detail = nmp.apply_to_module(
             detail, self.detail_path[-1], noise_map, detail.size(1)
@@ -183,7 +183,7 @@ class DualPathUNet(nn.Module):
         # [1, 256, 256, 256] -> [1, 512, 128, 128]
         enc3_down = self.down(enc3)
         bottleneck = nmp.apply_to_module(
-            enc3_down, self.bottleneck, noise_maps['down3'], self.base_channels * 8
+            enc3_down, self.bottleneck
         )
         nmp.detect_nan(bottleneck, "bottleneck")
 
