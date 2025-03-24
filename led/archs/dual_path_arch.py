@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from led.utils.registry import ARCH_REGISTRY
+import led.utils.noise_map_processor as nmp
 
 from .dual_path_components import (
     DilatedConvChain, HighFrequencyAttention,
@@ -36,27 +37,58 @@ class DualPathBlock(nn.Module):
         self.use_noise_map = use_noise_map
 
     def forward(self, x, noise_map=None):
+
+        # Check for NaN values in the input
+        nmp.detect_nan(x, "DualPathBlock input")
+
+        # Check noise map for NaN values if provided
+        if noise_map is not None:
+            nmp.detect_nan(noise_map, "DualPathBlock noise map")
+
         # shared feature extraction
         feat = self.features(x)
         feat = self.activation(feat)
 
-        # detail path processing
+        #----------------------------- DETAIL PATH -----------------------------#
+
         if isinstance(self.detail_path[-1], HighFrequencyAttention) and self.use_noise_map:
             detail = self.detail_path[0](feat)
-            detail = self.detail_path[-1](detail, noise_map)
+            detail = nmp.apply_to_module(
+            detail, self.detail_path[-1], noise_map, detail.size(1)
+        )
         else:
             detail = self.detail_path(feat)
+        nmp.detect_nan(detail, "detail path output")
 
-        # denoising path processing
-        gate = self.denoise_gate(feat) if self.use_noise_map else self.denoise_gate(feat)
+        #--------------------------- DENOISING PATH ---------------------------#
+
+        # Compute adaptive gating mechanism
+        if self.use_noise_map and noise_map is not None:
+            # Get denoising gate with adjusted noise map
+            gate = nmp.apply_to_module(
+                feat, self.denoise_gate, noise_map, feat.size(1)
+            )
+        else:
+            # Get denoising gate without noise map
+            gate = self.denoise_gate(feat)
+
+        # Apply residual denoising with gating
         denoise = self.residual_denoiser(feat, gate)
+        nmp.detect_nan(denoise, "denoising path output")
 
-        # dynamic fusion
-        if self.use_noise_map:
-            out = self.fusion(detail, denoise, feat, noise_map)
+        #--------------------------- DYNAMIC FUSION ---------------------------#
+
+         # Fuse outputs from both paths using content-aware mechanism
+        if self.use_noise_map and noise_map is not None:
+            # wrap the fusion call with correct parameters
+            fusion_func = lambda d, n: self.fusion(d, denoise, feat, n)
+            out = nmp.apply_to_module(
+                detail, fusion_func, noise_map, feat.size(1)
+            )
         else:
             out = self.fusion(detail, denoise, feat)
 
+        nmp.detect_nan(out, "fusion output")
         return out
 
 @ARCH_REGISTRY.register()
@@ -67,6 +99,7 @@ class DualPathUNet(nn.Module):
                  use_sharpness_recovery=True, use_noise_map=False):
         super(DualPathUNet, self).__init__()
 
+        self.base_channels = base_channels
         self.use_noise_map = use_noise_map
         self.use_wavelet_upsample = use_wavelet_upsample
         self.use_sharpness_recovery = use_sharpness_recovery
@@ -105,45 +138,85 @@ class DualPathUNet(nn.Module):
             self.sharpness_recovery = SharpnessRecovery(out_channels, use_noise_map)
 
     def forward(self, x, noise_map=None):
+
+        nmp.detect_nan(x, "input image")
+
+        if noise_map is not None:
+            nmp.detect_nan(noise_map, "input noise map")
+
         # concatenate noise map if needed
         if self.use_noise_map and noise_map is not None:
             # noise map for different size
+            noise_maps = nmp.create_multiscale_maps(
+                noise_map, scales=[1, 2, 4, 8]
+            )
             noise_maps = {
-                'original': noise_map,
-                'down1': F.avg_pool2d(noise_map, 2),
-                'down2': F.avg_pool2d(F.avg_pool2d(noise_map, 2), 2),
-                'down3': F.avg_pool2d(F.avg_pool2d(F.avg_pool2d(noise_map, 2), 2), 2)
+                'original': noise_maps['scale_1'],
+                'down1': noise_maps['scale_2'],
+                'down2': noise_maps['scale_4'],
+                'down3': noise_maps['scale_8']
             }
             x_input = torch.cat([x, noise_map], dim=1)
         else:
             noise_maps = {k: None for k in ['original', 'down1', 'down2', 'down3']}
             x_input = x
 
-        # encoder
+        #--------------------------- ENCODER PATH ---------------------------#
+
         # [1, 4/8, 1024, 1024] -> [1, 64, 1024, 1024]
-        enc1 = self.enc1(x_input, noise_maps['original'])
+        enc1 = nmp.apply_to_module(
+            x_input, self.enc1, noise_maps['original'], self.base_channels
+        )
         # [1, 64, 1024, 1024] -> [1, 128, 512, 512]
-        enc2 = self.enc2(self.down(enc1), noise_maps['down1'])
+        enc1_down = self.down(enc1)
+        enc2 = nmp.apply_to_module(
+            enc1_down, self.enc2, noise_maps['down1'], self.base_channels * 2
+        )
         # [1, 128, 512, 512] -> [1, 256, 256, 256]
-        enc3 = self.enc3(self.down(enc2), noise_maps['down2'])
+        enc2_down = self.down(enc2)
+        enc3 = nmp.apply_to_module(
+            enc2_down, self.enc3, noise_maps['down2'], self.base_channels * 4
+        )
 
-        # bottleneck
+        #--------------------------- BOTTLENECK ---------------------------#
+
         # [1, 256, 256, 256] -> [1, 512, 128, 128]
-        bottleneck = self.bottleneck(self.down(enc3), noise_maps['down3'])
+        enc3_down = self.down(enc3)
+        bottleneck = nmp.apply_to_module(
+            enc3_down, self.bottleneck, noise_maps['down3'], self.base_channels * 8
+        )
+        nmp.detect_nan(bottleneck, "bottleneck")
 
-        # decoder
+        #--------------------------- DECODER PATH ---------------------------#
+
         # [1, 512, 128, 128] -> [[1, 256, 256, 256]] + [1, 256, 256, 256] -> [1, 256, 256, 256]
-        dec3 = self.dec3(torch.cat([self.up3(bottleneck), enc3], dim=1), noise_maps['down2'])  # 使用 up3
+        bottleneck_up = self.up3(bottleneck)
+        dec3_input = torch.cat([bottleneck_up, enc3], dim=1)
+        dec3 = nmp.apply_to_module(
+            dec3_input, self.dec3, noise_maps['down2'], self.base_channels * 4
+        )
         # [1, 256, 256, 256] -> [1, 128, 512, 512]
-        dec2 = self.dec2(torch.cat([self.up2(dec3), enc2], dim=1), noise_maps['down1'])        # 使用 up2
+        dec3_up = self.up2(dec3)
+        dec2_input = torch.cat([dec3_up, enc2], dim=1)
+        dec2 = nmp.apply_to_module(
+            dec2_input, self.dec2, noise_maps['down1'], self.base_channels * 2
+        )
         # [1, 128, 512, 512] -> [1, 64, 1024, 1024]
-        dec1 = self.dec1(torch.cat([self.up1(dec2), enc1], dim=1), noise_maps['original'])        # 使用 up1
+        dec2_up = self.up1(dec2)
+        dec1_input = torch.cat([dec2_up, enc1], dim=1)
+        dec1 = nmp.apply_to_module(
+            dec1_input, self.dec1, noise_maps['original'], self.base_channels
+        )
 
-        # final output
+        #--------------------------- FINAL OUTPUT ---------------------------#
+
         out = self.final(dec1)
+        nmp.detect_nan(out, "final network output")
 
         # sharpness recovery
         if self.use_sharpness_recovery:
-            out = self.sharpness_recovery(out, noise_maps['original'])
+            out = nmp.apply_to_module(
+                out, self.sharpness_recovery, noise_maps['original'], out.size(1)
+            )
 
         return out
