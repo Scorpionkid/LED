@@ -9,7 +9,7 @@ class DynamicFusion(nn.Module):
 
         # Complexity estimator
         self.complexity_est = nn.Sequential(
-            nn.Conv2d(input_channels, channels//2, 3, padding=1),
+            nn.Conv2d(channels, channels//2, 3, padding=1),
             nn.ReLU(inplace=True),
             nn.Conv2d(channels//2, 1, 3, padding=1),
             nn.Sigmoid()
