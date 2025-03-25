@@ -7,7 +7,7 @@ import led.utils.noise_map_processor as nmp
 from .dual_path_components import (
     DilatedConvChain, HighFrequencyAttention,
     AdaptiveDenoiseGate, ResidualDenoiser,
-    DynamicFusion, WaveletUpsample, SharpnessRecovery
+    DynamicFusion, WaveletUpsample, SharpnessRecovery, DiscreteWaveletUpsample
 )
 
 class DualPathBlock(nn.Module):
@@ -37,6 +37,10 @@ class DualPathBlock(nn.Module):
         self.use_noise_map = use_noise_map
 
     def forward(self, x, noise_map=None):
+        print(f"\n==== DUALPATHBLOCK FORWARD ====")
+        print(f"Block input shape: {x.shape}")
+        print(f"Block noise_map: {'None' if noise_map is None else noise_map.shape}")
+        print(f"use_noise_map: {self.use_noise_map}")
 
         # Check for NaN values in the input
         nmp.detect_nan(x, "DualPathBlock input")
@@ -48,20 +52,22 @@ class DualPathBlock(nn.Module):
         # shared feature extraction
         feat = self.features(x)
         feat = self.activation(feat)
+        print(f"Feature extraction output shape: {feat.shape}")
 
         #----------------------------- DETAIL PATH -----------------------------#
-
+        print("Detail path processing...")
         if isinstance(self.detail_path[-1], HighFrequencyAttention) and self.use_noise_map and noise_map is not None:
             detail = self.detail_path[0](feat)
+            print(f"Detail path intermediate shape: {detail.shape}")
             detail = nmp.apply_to_module(
             detail, self.detail_path[-1], noise_map, detail.size(1)
         )
         else:
             detail = self.detail_path(feat)
         nmp.detect_nan(detail, "detail path output")
-
+        print(f"Detail path output shape: {detail.shape}")
         #--------------------------- DENOISING PATH ---------------------------#
-
+        print("Denoising path processing...")
         # Compute adaptive gating mechanism
         if self.use_noise_map and noise_map is not None:
             # Get denoising gate with adjusted noise map
@@ -72,12 +78,13 @@ class DualPathBlock(nn.Module):
             # Get denoising gate without noise map
             gate = self.denoise_gate(feat)
 
+        print(f"Gate shape: {gate.shape}")
         # Apply residual denoising with gating
         denoise = self.residual_denoiser(feat, gate)
         nmp.detect_nan(denoise, "denoising path output")
-
+        print(f"Denoising path output shape: {denoise.shape}")
         #--------------------------- DYNAMIC FUSION ---------------------------#
-
+        print("Fusion processing...")
          # Fuse outputs from both paths using content-aware mechanism
         if self.use_noise_map and noise_map is not None:
             # wrap the fusion call with correct parameters
@@ -89,6 +96,7 @@ class DualPathBlock(nn.Module):
             out = self.fusion(detail, denoise, feat)
 
         nmp.detect_nan(out, "fusion output")
+        print(f"Fusion output shape: {out.shape}")
         return out
 
 @ARCH_REGISTRY.register()
@@ -104,7 +112,8 @@ class DualPathUNet(nn.Module):
         self.use_wavelet_upsample = use_wavelet_upsample
         self.use_sharpness_recovery = use_sharpness_recovery
 
-        enc1_in_channels = in_channels * 2 if use_noise_map else in_channels
+        # enc1_in_channels = in_channels * 2 if use_noise_map else in_channels
+        enc1_in_channels = in_channels
 
         # encoder
         self.enc1 = DualPathBlock(enc1_in_channels, base_channels, use_noise_map)
@@ -126,7 +135,7 @@ class DualPathUNet(nn.Module):
 
         # final upsample, with optional wavelet upsample
         if use_wavelet_upsample:
-            self.up1 = WaveletUpsample(base_channels*2, base_channels)
+            self.up1 = DiscreteWaveletUpsample(base_channels*2, base_channels)
         else:
             self.up1 = nn.ConvTranspose2d(base_channels*2, base_channels, 2, stride=2)
 
@@ -138,6 +147,10 @@ class DualPathUNet(nn.Module):
             self.sharpness_recovery = SharpnessRecovery(out_channels, use_noise_map)
 
     def forward(self, x, noise_map=None):
+        print("\n==== DUALPATHNET FORWARD ====")
+        print(f"Input x shape: {x.shape}")
+        print(f"Input noise_map: {'None' if noise_map is None else noise_map.shape}")
+        print(f"self.use_noise_map: {self.use_noise_map}")
 
         nmp.detect_nan(x, "input image")
 
@@ -147,6 +160,7 @@ class DualPathUNet(nn.Module):
         # concatenate noise map if needed
         if self.use_noise_map and noise_map is not None:
             # noise map for different size
+            print("Creating multiscale noise maps")
             noise_maps = nmp.create_multiscale_maps(
                 noise_map, scales=[1, 2, 4, 8]
             )
@@ -156,10 +170,18 @@ class DualPathUNet(nn.Module):
                 'down2': noise_maps['scale_4'],
                 'down3': noise_maps['scale_8']
             }
-            x_input = torch.cat([x, noise_map], dim=1)
+            print(f"Created {len(noise_maps)} noise maps")
+            for k, v in noise_maps.items():
+                if v is not None:
+                    print(f"  {k}: {v.shape}")
+            # x_input = torch.cat([x, noise_map], dim=1)
+            x_input = x
         else:
+            print("Not using noise maps or noise_map is None")
             noise_maps = {k: None for k in ['original', 'down1', 'down2', 'down3']}
             x_input = x
+
+        print(f"x_input shape: {x_input.shape}")
 
         #--------------------------- ENCODER PATH ---------------------------#
 
