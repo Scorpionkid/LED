@@ -12,7 +12,6 @@ from led.utils import get_root_logger
 from led.utils.registry import MODEL_REGISTRY
 from led.losses.perceptual_loss import VGGPerceptualLoss
 from led.losses.gradient_loss import GradientLoss
-from led.archs.dual_path_components.noise_map import generate_noise_map
 
 @MODEL_REGISTRY.register()
 class DualPathModel(RAWBaseModel):
@@ -191,7 +190,6 @@ class DualPathModel(RAWBaseModel):
         print(f"Input lq shape: {self.lq.shape}")
         print(f"Using use_noise_map: {self.use_noise_map}")
 
-        # 使用噪声生成器生成训练数据（如果有）
         if hasattr(self, 'noise_g'):
             self.camera_id = torch.randint(0, len(self.noise_g), (1,)).item()
             with torch.no_grad():
@@ -202,31 +200,16 @@ class DualPathModel(RAWBaseModel):
                 if 'cam' in self.curr_metadata:
                     self.camera_name = self.curr_metadata['cam']
 
-                # 如果网络支持噪声图，则生成噪声图
                 if self.use_noise_map:
-                    noise_map = generate_noise_map(
-                        image=self.lq,
-                        noise_params=self.curr_metadata['noise_params'],
-                        camera_params=None,  # 不需要，因为已有噪声参数
-                        iso=None             # 不需要，因为已有噪声参数
-                    )
+                    noise_map = self.generate_noise_map_from_metadata(self.lq, self.curr_metadata['noise_params'])
 
-                # 数据增强
                 if hasattr(self, 'augment') and self.augment is not None:
                     self.gt, self.lq = self.augment(self.gt, self.lq)
                     if noise_map is not None:
-                        # 对噪声图进行相同的增强
                         noise_map = self.augment(noise_map)[0]
 
-        # 如果没有噪声生成器但需要噪声图，使用ISO计算（测试时或特定场景）
         elif self.use_noise_map and hasattr(self, 'iso') and self.iso is not None:
-            noise_map = generate_noise_map(
-                image=self.lq,
-                noise_params=None,
-                camera_params=getattr(self, 'camera_params', None),
-                iso=self.iso,
-                camera_name=getattr(self, 'camera_name', None)
-            )
+            noise_map = self.generate_noise_map_from_iso(self.lq, self.iso)
 
         print(f"Final forward call parameters: lq shape={self.lq.shape}, noise_map={'None' if noise_map is None else noise_map.shape}")
         if self.use_amp:
@@ -312,13 +295,7 @@ class DualPathModel(RAWBaseModel):
         # noise map
         noise_map = None
         if self.use_noise_map and hasattr(self, 'iso') and self.iso is not None:
-            noise_map = generate_noise_map(
-                image=self.lq,
-                noise_params=None,
-                camera_params=getattr(self, 'camera_params', None),
-                iso=self.iso,
-                camera_name=getattr(self, 'camera_name', None)
-            )
+            noise_map = self.generate_noise_map_from_iso(self.lq, self.iso)
         if hasattr(self, 'net_g_ema'):
             self.net_g_ema.eval()
             with torch.no_grad():
@@ -352,3 +329,24 @@ class DualPathModel(RAWBaseModel):
         else:
             self.save_network(self.net_g, 'net_g', current_iter)
         self.save_training_state(epoch, current_iter)
+
+    def generate_noise_map_from_metadata(self, image, noise_params):
+        """Helper method to generate noise map from metadata."""
+        from led.archs.dual_path_components.noise_map import generate_noise_map
+        return generate_noise_map(
+            image=image,
+            noise_params=noise_params,
+            camera_params=None,
+            iso=None
+        )
+
+    def generate_noise_map_from_iso(self, image, iso):
+        """Helper method to generate noise map from ISO value."""
+        from led.archs.dual_path_components.noise_map import generate_noise_map
+        return generate_noise_map(
+            image=image,
+            noise_params=None,
+            camera_params=getattr(self, 'camera_params', None),
+            iso=iso,
+            camera_name=getattr(self, 'camera_name', None)
+        )
