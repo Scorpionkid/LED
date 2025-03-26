@@ -1,9 +1,9 @@
 base:
 - options/base/dataset/pretrain/SID_train.yaml                 # train dataset
-- options/base/dataset/test/SID_SonyA7S2_val_split.yaml         # test dataset
-- options/DualPath/base/network_g/dual_path_unet.yaml           # network_g
-- options/DualPath/base/network_d/vgg_freq_disc.yaml            # network_d
-- options/base/val_and_logger.yaml                              # val + logger
+- options/base/dataset/test/SID_SonyA7S2_val_split.yaml        # test dataset
+- options/DualPath/base/network_g/dual_path_unet.yaml          # network_g
+- options/DualPath/base/network_d/vgg_freq_disc.yaml           # network_d
+- options/base/val_and_logger.yaml                             # val + logger
 
 name: DualPath_GAN_Training
 model_type: DualPathGANModel
@@ -22,7 +22,7 @@ datasets:
 train:
   optim_g:
     type: Adam
-    lr: !!float 1e-4
+    lr: !!float 5e-5
     weight_decay: 0
     betas: [0.9, 0.999]
 
@@ -34,18 +34,23 @@ train:
 
   scheduler:
     type: CosineAnnealingRestartLR
-    periods: [200000]
+    periods: [150000]
     restart_weights: [1]
     eta_min: !!float 1e-7
 
-  total_iter: 200000
-  warmup_iter: 5000  # warm up period
+  total_iter: 150000
+  warmup_iter: 2000
 
-  # GAN training parameters
-  net_d_iters: 1  # number of discriminator iterations per generator iteration
-  net_d_start_iter: 50000  # start GAN training after this many iterations
+  # GAN
+  net_d_iters: 1
+  net_d_start_iter: 10000
+  net_d_init_iters: 3
 
-  gan_weight: 0.01  # weight for the adversarial loss
+  # 对抗损失权重调度
+  gan_weight_init: 0.0005
+  gan_weight_final: 0.01
+  gan_weight_start_iter: 10000
+  gan_weight_end_iter: 80000
 
   # losses
   pixel_opt:
@@ -56,8 +61,6 @@ train:
   perceptual_opt:
     type: VGGPerceptualLoss
     layer_weights:
-      conv1_2: 0.1
-      conv2_2: 0.1
       conv3_4: 0.1
       conv4_4: 0.1
       conv5_4: 0.1
@@ -73,14 +76,15 @@ train:
     gan_type: wgan_gp
     real_label_val: 1.0
     fake_label_val: 0.0
-    loss_weight: 1.0
+    loss_weight: 1.0       # 这是基础权重，实际权重会根据调度变化
 
 path:
-  pretrain_network_g: pretrained/models/DualPath_Pretrain_Basic/net_g_latest.pth
+  pretrain_network_g: experiments/DualPath_Pretrain_Basic/models/net_g_latest.pth
   strict_load_g: true
   pretrain_network_d: ~
   strict_load_d: true
   resume_state: ~
+  CRF: datasets/EMoR
 
 val:
   val_freq: !!float 2000
@@ -94,3 +98,10 @@ val:
       type: calculate_ssim
       crop_border: 2
       test_y_channel: false
+    # 可以考虑添加感知质量指标如LPIPS
+
+logger:
+  print_freq: 100
+  save_checkpoint_freq: !!float 5000
+  use_tb_logger: true
+  wandb: ~
