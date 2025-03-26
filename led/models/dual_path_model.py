@@ -241,6 +241,7 @@ class DualPathModel(RAWBaseModel):
 
     def test(self):
         """Forward function used in testing."""
+        # noise map
         noise_map = None
         if hasattr(self.net_g, 'use_noise_map') and self.net_g.use_noise_map and hasattr(self, 'iso') and self.iso is not None:
             noise_map = generate_noise_map(
