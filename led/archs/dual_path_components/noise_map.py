@@ -58,6 +58,26 @@ def generate_noise_map(image, noise_params=None, camera_params=None, iso=None, c
         return None
 
     # Calculate standard deviation noise map: sqrt(K*R + sigma_r^2)
-    noise_std = torch.sqrt(K * image + sigma_r**2)
+    # Check and handle potential NaN values
+    if torch.isnan(K).any():
+        print("Warning: NaN values detected in K, replacing with default value 0.1")
+        K = torch.nan_to_num(K, nan=0.1)
+    if torch.isnan(sigma_r).any():
+        print("Warning: NaN values detected in sigma_r, replacing with default value 0.01")
+        sigma_r = torch.nan_to_num(sigma_r, nan=0.01)
+
+    # For noise estimation, ensure values are non-negative
+    image_for_noise = torch.abs(image)  # Use absolute values to preserve information
+
+    # Calculate noise standard deviation: sqrt(K*R + sigma_r^2), ensuring inner term is positive
+    inner_term = K * image_for_noise + sigma_r**2
+    inner_term = torch.clamp(inner_term, min=1e-10)  # Ensure non-negative
+    noise_std = torch.sqrt(inner_term)
+
+    # Filter potential NaN values in the result
+    if torch.isnan(noise_std).any():
+        nan_percentage = torch.isnan(noise_std).float().mean().item() * 100
+        print(f"Warning: {nan_percentage:.2f}% NaN values in noise_std, replaced")
+        noise_std = torch.nan_to_num(noise_std, nan=0.01)
 
     return noise_std

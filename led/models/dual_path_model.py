@@ -3,6 +3,7 @@ from collections import OrderedDict
 from copy import deepcopy
 from os import path as osp
 import os
+from torch.cuda.amp import autocast, GradScaler
 
 from led.archs import build_network
 from led.losses import build_loss
@@ -26,6 +27,9 @@ class DualPathModel(RAWBaseModel):
 
         # define network
         self.net_g = build_network(opt['network_g'])
+        self.use_noise_map = opt['network_g'].get('use_noise_map', False)
+        print(f"Configured use_noise_map: {self.use_noise_map}")
+
         self.net_g = self.model_to_device(self.net_g)
         self.print_network(self.net_g)
 
@@ -70,6 +74,8 @@ class DualPathModel(RAWBaseModel):
                 #TODO使用实际加噪相机
                 self.camera_name = opt.get('camera_name', 'IC0')
 
+
+
         # load pretrained models
         load_path = self.opt['path'].get('pretrain_network_g', None)
         if load_path is not None:
@@ -78,6 +84,17 @@ class DualPathModel(RAWBaseModel):
 
         if self.is_train:
             self.init_training_settings()
+
+        # Add support for mixed precision training.
+        self.use_amp = opt.get('use_amp', False)
+        if self.use_amp:
+            self.scaler = GradScaler()
+            print("Using Automatic Mixed Precision training")
+
+        # gradient accumulation
+        # self.accumulation_steps = opt.get('accumulation_steps', 1)
+        # if self.accumulation_steps > 1:
+        #     print(f"Using gradient accumulation: {self.accumulation_steps} steps")
 
     def init_training_settings(self):
         self.net_g.train()
@@ -163,11 +180,18 @@ class DualPathModel(RAWBaseModel):
 
     def optimize_parameters(self, current_iter):
         """Optimize model parameters."""
+        #TODO
+        # if current_iter % self.accumulation_steps == 0:
+        #     self.optimizer_g.zero_grad()
         self.optimizer_g.zero_grad()
 
         noise_map = None
 
-        # 使用虚拟噪声生成器生成训练数据（如果有）
+        print("\n==== OPTIMIZE PARAMETERS ====")
+        print(f"Input lq shape: {self.lq.shape}")
+        print(f"Using use_noise_map: {self.use_noise_map}")
+
+        # 使用噪声生成器生成训练数据（如果有）
         if hasattr(self, 'noise_g'):
             self.camera_id = torch.randint(0, len(self.noise_g), (1,)).item()
             with torch.no_grad():
@@ -179,7 +203,7 @@ class DualPathModel(RAWBaseModel):
                     self.camera_name = self.curr_metadata['cam']
 
                 # 如果网络支持噪声图，则生成噪声图
-                if hasattr(self.net_g, 'use_noise_map') and self.net_g.use_noise_map:
+                if self.use_noise_map:
                     noise_map = generate_noise_map(
                         image=self.lq,
                         noise_params=self.curr_metadata['noise_params'],
@@ -195,7 +219,7 @@ class DualPathModel(RAWBaseModel):
                         noise_map = self.augment(noise_map)[0]
 
         # 如果没有噪声生成器但需要噪声图，使用ISO计算（测试时或特定场景）
-        elif hasattr(self.net_g, 'use_noise_map') and self.net_g.use_noise_map and hasattr(self, 'iso') and self.iso is not None:
+        elif self.use_noise_map and hasattr(self, 'iso') and self.iso is not None:
             noise_map = generate_noise_map(
                 image=self.lq,
                 noise_params=None,
@@ -204,46 +228,90 @@ class DualPathModel(RAWBaseModel):
                 camera_name=getattr(self, 'camera_name', None)
             )
 
-        # 使用噪声图（如果有）进行推理
-        if noise_map is not None and hasattr(self.net_g, 'use_noise_map') and self.net_g.use_noise_map:
-            self.output = self.net_g(self.lq, noise_map)
+        print(f"Final forward call parameters: lq shape={self.lq.shape}, noise_map={'None' if noise_map is None else noise_map.shape}")
+        if self.use_amp:
+            with autocast():
+                if noise_map is not None and self.use_noise_map:
+                    self.output = self.net_g(self.lq, noise_map)
+                else:
+                    self.output = self.net_g(self.lq)
+
+                print(f"Output shape: {self.output.shape}")
+
+                l_total = 0
+                loss_dict = OrderedDict()
+
+                # pixel loss
+                if self.cri_pix:
+                    l_pix = self.cri_pix(self.output, self.gt)
+                    l_total += l_pix
+                    loss_dict['l_pix'] = l_pix
+
+                # perceptual loss
+                if self.cri_perceptual:
+                    l_percep = self.cri_perceptual(self.output, self.gt)
+                    l_total += l_percep
+                    loss_dict['l_percep'] = l_percep
+
+                # gradient/edge loss
+                if self.cri_gradient:
+                    l_grad = self.cri_gradient(self.output, self.gt)
+                    l_total += l_grad
+                    loss_dict['l_grad'] = l_grad
+
+
+                l_total = l_total / self.accumulation_steps
+                self.scaler.scale(l_total).backward()
+                if (current_iter + 1) % self.accumulation_steps == 0:
+                    self.scaler.step(self.optimizer_g)
+                    self.scaler.update()
+
+                self.log_dict = self.reduce_loss_dict(loss_dict)
+
+                if self.ema_decay > 0:
+                    self.model_ema(decay=self.ema_decay)
         else:
-            self.output = self.net_g(self.lq)
+            if noise_map is not None and self.use_noise_map:
+                self.output = self.net_g(self.lq, noise_map)
+            else:
+                self.output = self.net_g(self.lq)
 
-        l_total = 0
-        loss_dict = OrderedDict()
+            print(f"Output shape: {self.output.shape}")
 
-        # pixel loss
-        if self.cri_pix:
-            l_pix = self.cri_pix(self.output, self.gt)
-            l_total += l_pix
-            loss_dict['l_pix'] = l_pix
+            l_total = 0
+            loss_dict = OrderedDict()
 
-        # perceptual loss
-        if self.cri_perceptual:
-            l_percep = self.cri_perceptual(self.output, self.gt)
-            l_total += l_percep
-            loss_dict['l_percep'] = l_percep
+            # pixel loss
+            if self.cri_pix:
+                l_pix = self.cri_pix(self.output, self.gt)
+                l_total += l_pix
+                loss_dict['l_pix'] = l_pix
 
-        # gradient/edge loss
-        if self.cri_gradient:
-            l_grad = self.cri_gradient(self.output, self.gt)
-            l_total += l_grad
-            loss_dict['l_grad'] = l_grad
+            # perceptual loss
+            if self.cri_perceptual:
+                l_percep = self.cri_perceptual(self.output, self.gt)
+                l_total += l_percep
+                loss_dict['l_percep'] = l_percep
 
-        l_total.backward()
-        self.optimizer_g.step()
+            # gradient/edge loss
+            if self.cri_gradient:
+                l_grad = self.cri_gradient(self.output, self.gt)
+                l_total += l_grad
+                loss_dict['l_grad'] = l_grad
 
-        self.log_dict = self.reduce_loss_dict(loss_dict)
+            l_total.backward()
+            self.optimizer_g.step()
 
-        if self.ema_decay > 0:
-            self.model_ema(decay=self.ema_decay)
+            self.log_dict = self.reduce_loss_dict(loss_dict)
+
+            if self.ema_decay > 0:
+                self.model_ema(decay=self.ema_decay)
 
     def test(self):
         """Forward function used in testing."""
         # noise map
         noise_map = None
-        if hasattr(self.net_g, 'use_noise_map') and self.net_g.use_noise_map and hasattr(self, 'iso') and self.iso is not None:
+        if self.use_noise_map and hasattr(self, 'iso') and self.iso is not None:
             noise_map = generate_noise_map(
                 image=self.lq,
                 noise_params=None,
@@ -254,7 +322,7 @@ class DualPathModel(RAWBaseModel):
         if hasattr(self, 'net_g_ema'):
             self.net_g_ema.eval()
             with torch.no_grad():
-                if noise_map is not None and hasattr(self.net_g_ema, 'use_noise_map') and self.net_g_ema.use_noise_map:
+                if noise_map is not None and self.use_noise_map:
                     self.output = self.net_g_ema(self.lq, noise_map)
                 else:
                     self.output = self.net_g_ema(self.lq)
@@ -264,7 +332,7 @@ class DualPathModel(RAWBaseModel):
         else:
             self.net_g.eval()
             with torch.no_grad():
-                if noise_map is not None and hasattr(self.net_g, 'use_noise_map') and self.net_g.use_noise_map:
+                if noise_map is not None and self.use_noise_map:
                     self.output = self.net_g(self.lq, noise_map)
                 else:
                     self.output = self.net_g(self.lq)
