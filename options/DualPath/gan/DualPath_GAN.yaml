@@ -3,6 +3,7 @@ base:
 - options/base/dataset/test/SID_SonyA7S2_val_split.yaml        # test dataset
 - options/DualPath/base/network_g/dual_path_unet.yaml          # network_g
 - options/DualPath/base/network_d/vgg_freq_disc.yaml           # network_d
+- options/base/noise_g/camera_params.yaml                      # camera_params
 - options/base/val_and_logger.yaml                             # val + logger
 
 name: DualPath_GAN_Training
@@ -11,6 +12,10 @@ scale: 1
 num_gpu: 1
 manual_seed: 2022
 
+network_g:
+  use_noise_map: true
+
+camera_name: SonyA7S2
 # training settings
 datasets:
   train:
