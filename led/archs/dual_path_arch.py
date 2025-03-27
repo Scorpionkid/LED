@@ -125,13 +125,13 @@ class DualPathBlock(nn.Module):
                     detail, fusion_func, noise_map, texture_mask, feat.size(1)
                 )
             else:
-                fusion_func = lambda d, t: self.fusion(d, denoise, feat, t)
+                fusion_func = lambda d, t: self.fusion(d, denoise, feat, None, t)
                 output = nmp.apply_to_module(
                     detail, fusion_func, texture_mask=texture_mask, target_channels=feat.size(1)
                 )
         else:
             if self.use_noise_map and noise_map is not None:
-                fusion_func = lambda d, n: self.fusion(d, denoise, feat, n)
+                fusion_func = lambda d, n: self.fusion(d, denoise, feat, n, None)
                 output = nmp.apply_to_module(
                     detail, fusion_func, noise_map=noise_map, target_channels=feat.size(1)
                 )
@@ -211,10 +211,10 @@ class DualPathUNet(nn.Module):
             self.sharpness_recovery = SharpnessRecovery(out_channels, use_noise_map, use_texture_detection, sharpness_texture_boost=texture_params.get('sharpness_texture_boost', 0.3))
 
     def forward(self, x, noise_map=None, texture_mask=None):
-        print("\n==== DUALPATHNET FORWARD ====")
-        print(f"Input x shape: {x.shape}")
-        print(f"Input noise_map: {'None' if noise_map is None else noise_map.shape}")
-        print(f"self.use_noise_map: {self.use_noise_map}")
+        # print("\n==== DUALPATHNET FORWARD ====")
+        # print(f"Input x shape: {x.shape}")
+        # print(f"Input noise_map: {'None' if noise_map is None else noise_map.shape}")
+        # print(f"self.use_noise_map: {self.use_noise_map}")
 
         nmp.detect_nan(x, "input image")
 
