@@ -92,7 +92,8 @@ def create_multiscale_maps(noise_map, scales=[1, 2, 4, 8]):
 
     return result
 
-def apply_to_module(tensor, module, noise_map=None, target_channels=None):
+def apply_to_module(tensor, module, noise_map=None, texture_mask=None,
+                    target_channels=None):
     """
     Process input tensor and noise map before passing to a module.
 
@@ -103,10 +104,17 @@ def apply_to_module(tensor, module, noise_map=None, target_channels=None):
         module (nn.Module): Neural network module to apply
         noise_map (Tensor, optional): Noise map tensor
         target_channels (int, optional): Target channel count for noise map
+        texture_mask (Tensor, optional): Texture mask tensor
 
     Returns:
         Tensor: Result from module execution
     """
+    module_name = module.__class__.__name__
+    # print(f"\n--- APPLY_TO_MODULE: {module_name} ---")
+    # print(f"Input tensor shape: {tensor.shape}")
+    # print(f"Noise map: {'None' if noise_map is None else noise_map.shape}")
+    # print(f"Target channels: {target_channels}")
+
     # Check for NaN in input tensor
     detect_nan(tensor, f"input to {module.__class__.__name__}")
 
@@ -122,11 +130,45 @@ def apply_to_module(tensor, module, noise_map=None, target_channels=None):
         if noise_map.size(1) != target_channels:
             noise_map = adjust_channels(noise_map, target_channels)
 
+        # Check spatial dimensions - should match input tensor
+        if noise_map.shape[2:] != tensor.shape[2:]:
+            raise ValueError(f"Noise map spatial dimensions {noise_map.shape[2:]} do not match "
+                           f"input tensor dimensions {tensor.shape[2:]} for module {module.__class__.__name__}")
+
+    # Prepare texture_mask if provided
+    if texture_mask is not None:
+        # Check for NaN in texture mask
+        detect_nan(texture_mask, f"texture mask for {module.__class__.__name__}")
+
+        # Only adjust channel dimension if needed
+        if target_channels is not None and texture_mask.size(1) != target_channels:
+            texture_mask = adjust_channels(texture_mask, target_channels)
+
+        # Check spatial dimensions - should match input tensor
+        if texture_mask.shape[2:] != tensor.shape[2:]:
+            raise ValueError(f"Texture mask spatial dimensions {texture_mask.shape[2:]} do not match "
+                           f"input tensor dimensions {tensor.shape[2:]} for module {module.__class__.__name__}")
+
     # Apply module
     try:
-        if noise_map is not None:
-            result = module(tensor, noise_map)
+        # Determine which forward signature to use based on module interface
+        if hasattr(module, 'forward'):
+            params = module.forward.__code__.co_varnames
+
+            if 'texture_mask' in params and 'noise_map' in params:
+                # Module accepts both texture_mask and noise_map
+                result = module(tensor, noise_map, texture_mask)
+            elif 'texture_mask' in params:
+                # Module accepts texture_mask but not noise_map
+                result = module(tensor, texture_mask)
+            elif 'noise_map' in params:
+                # Module accepts noise_map but not texture_mask
+                result = module(tensor, noise_map)
+            else:
+                # Basic module with no special parameters
+                result = module(tensor)
         else:
+            # Fallback for callable objects without explicit forward method
             result = module(tensor)
 
         # Check for NaN in output
@@ -134,6 +176,12 @@ def apply_to_module(tensor, module, noise_map=None, target_channels=None):
         return result
 
     except Exception as e:
-        warnings.warn(f"Error applying module {module.__class__.__name__}: {str(e)}")
-        # Return tensor to maintain data flow in case of error
-        return tensor
+        print("\n========== EXECUTION HALTED FOR DEBUGGING ==========")
+        print(f"Error occurred in module {module_name}")
+        print(f"Input tensor shape: {tensor.shape}")
+        print(f"Noise map: {'None' if noise_map is None else noise_map.shape}")
+        print("Stack trace:")
+        # import traceback
+        # traceback.print_exc()
+
+        raise RuntimeError(f"Debug halt: Error in {module_name}: {str(e)}")

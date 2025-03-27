@@ -52,18 +52,29 @@ class DilatedConvChain(nn.Module):
 
 class HighFrequencyAttention(nn.Module):
     # High-frequency attention module, focusing on edge and texture information in the image
-    def __init__(self, channels, use_noise_map=False):
+    def __init__(self, channels, use_noise_map=False, use_texture_mask=False):
         super(HighFrequencyAttention, self).__init__()
         self.edge_detector = SobelFilter()
         self.conv_edge = nn.Conv2d(channels, channels, 3, padding=1)
         self.use_noise_map = use_noise_map
+        self.use_texture_mask = use_texture_mask
+
+        # self.noise_conv = nn.Conv2d(4, channels, 1)
 
         self.attention = nn.Sequential(
             nn.Conv2d(channels * 2, channels, 3, padding=1),
             nn.Sigmoid()
         )
 
-    def forward(self, x, noise_map = None):
+        if use_texture_mask:
+            self.texture_enhance = nn.Sequential(
+                nn.Conv2d(channels + 1, channels, 1),
+                nn.LeakyReLU(0.2, inplace=True),
+                nn.Conv2d(channels, channels, 3, padding=1)
+            )
+            self.texture_gate = nn.Parameter(torch.tensor(0.5))
+
+    def forward(self, x, noise_map=None, texture_mask=None):
         # Edge detection
         edge_map = self.edge_detector(x)
         edge_feat = self.conv_edge(edge_map)
@@ -71,11 +82,26 @@ class HighFrequencyAttention(nn.Module):
         # base attention
         attention = self.attention(torch.cat([x, edge_feat], dim=1))
 
-        # # Directly use the noise map to correct the attention.
+        # Directly use the noise map to correct the attention.
         # Regions with high noise should reduce edge sensitivity.
         if self.use_noise_map and noise_map is not None:
             # The larger the value of the noise map, the smaller the attention weight.
             noise_weight = torch.exp(-5.0 * noise_map)  # Exponential decay function
             attention = attention * noise_weight
+
+        # 新增：纹理感知增强
+        if self.use_texture_mask and texture_mask is not None:
+            if texture_mask.shape[2:] != x.shape[2:]:
+                raise ValueError(f"Texture mask shape {texture_mask.shape} does not match input shape {x.shape}")
+
+            # 根据纹理掩码增强边缘响应
+            texture_feat = self.texture_enhance(torch.cat([x, texture_mask], dim=1))
+
+            # 使用可学习参数控制纹理增强强度
+            gate = torch.sigmoid(self.texture_gate)
+
+            # 在高纹理区域增强注意力，保留更多细节
+            texture_attention = attention + gate * texture_mask * texture_feat
+            attention = torch.clamp(texture_attention, 0.0, 1.0)
 
         return x * attention + x # Residual connection

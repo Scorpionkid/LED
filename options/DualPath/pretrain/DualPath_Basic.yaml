@@ -9,10 +9,11 @@ name: DualPath_Pretrain_Basic
 model_type: DualPathModel
 scale: 1
 num_gpu: 1
-manual_seed: 2022
+manual_seed: 2025
 
 network_g:
   use_noise_map: true
+  use_texture_detection: true
 
 camera_name: SonyA7S2
 
@@ -37,15 +38,30 @@ train:
     restart_weights: [1]
     eta_min: !!float 1e-7
 
-  total_iter: 200000
+  # TODO: test 5
+  total_iter: 5
   warmup_iter: 5000  # warm up period
 
   # losses
+  # 自适应纹理损失开关 (仅当use_texture_detection=true时生效)
+  adaptive_loss: true
+
+  # 损失函数设置
+  # 当use_texture_detection=true且adaptive_loss=true时，会自动切换为AdaptiveTextureLoss
   pixel_opt:
     type: L1Loss
     loss_weight: 1.0
     reduction: mean
+    # 以下参数仅当转换为AdaptiveTextureLoss时生效
+    pixel_loss_type: l1
+    flat_weight: 1.2        # 平坦区域权重
+    texture_weight: 1.0     # 纹理区域权重
+    perceptual_weight: 0.1  # 纹理区域感知损失权重
+    gradient_weight: 0.1    # 纹理区域梯度损失权重
+    texture_threshold: 0.5  # 纹理区域阈值
+    use_dynamic_weights: true # 使用动态权重
 
+  # 常规感知损失设置
   perceptual_opt:
     type: VGGPerceptualLoss
     layer_weights:
@@ -67,7 +83,7 @@ path:
   resume_state: ~
 
 val:
-  val_freq: !!float 2000
+  val_freq: !!float 2
   save_img: true
   metrics:
     psnr:
@@ -79,3 +95,10 @@ val:
       crop_border: 2
       test_y_channel: false
   illumination_correct: true
+
+  # logging settings
+logger:
+  print_freq: 2
+  save_checkpoint_freq: !!float 5
+  use_tb_logger: true
+  wandb: ~

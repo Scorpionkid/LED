@@ -49,14 +49,24 @@ class AdaptiveUnsharpMask(nn.Module):
 
 
 class SharpnessRecovery(nn.Module):
-    def __init__(self, in_channels=4, use_noise_map=False):
+    def __init__(self, in_channels=4, use_noise_map=False, use_texture_mask=False):
         super(SharpnessRecovery, self).__init__()
         self.use_noise_map = use_noise_map
+        self.use_texture_mask = use_texture_mask
         if not use_noise_map:
             self.noise_estimator = NoiseLevelNetwork(in_channels)
         self.adaptive_sharp = AdaptiveUnsharpMask(in_channels)
 
-    def forward(self, x, noise_map=None):
+        if use_texture_mask:
+            self.texture_enhance = nn.Sequential(
+                nn.Conv2d(1, 8, 3, padding=1),
+                nn.LeakyReLU(0.2, inplace=True),
+                nn.Conv2d(8, 1, 3, padding=1),
+                nn.Sigmoid()
+            )
+            self.texture_boost = nn.Parameter(torch.tensor(0.3))
+
+    def forward(self, x, noise_map=None, texture_mask=None):
 
         if self.use_noise_map and noise_map is not None:
             # Use simple inversion and cropping functions.
@@ -64,6 +74,18 @@ class SharpnessRecovery(nn.Module):
         else:
             noise_level = self.noise_estimator(x)
             sharp_mask = 1.0 - noise_level
+
+        if self.use_texture_mask and texture_mask is not None:
+            if texture_mask.shape[2:] != x.shape[2:]:
+                raise ValueError(f"Texture mask shape {texture_mask.shape} does not match input shape {x.shape}")
+
+            # 增强纹理区域的锐化强度
+            texture_effect = self.texture_enhance(texture_mask)
+
+            # 应用纹理增强（控制在合理范围内）
+            boost_factor = torch.sigmoid(self.texture_boost)
+            texture_boosted = sharp_mask + boost_factor * texture_effect * texture_mask
+            sharp_mask = torch.clamp(texture_boosted, 0.0, 1.0)
 
         # Generate sharpness mask
         # sharpen in low noise regions, keep in high noise regions

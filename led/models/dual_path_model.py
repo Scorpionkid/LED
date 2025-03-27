@@ -12,6 +12,7 @@ from led.utils import get_root_logger
 from led.utils.registry import MODEL_REGISTRY
 from led.losses.perceptual_loss import VGGPerceptualLoss
 from led.losses.gradient_loss import GradientLoss
+from led.losses.adaptive_texture_loss import AdaptiveTextureLoss
 
 @MODEL_REGISTRY.register()
 class DualPathModel(RAWBaseModel):
@@ -27,7 +28,10 @@ class DualPathModel(RAWBaseModel):
         # define network
         self.net_g = build_network(opt['network_g'])
         self.use_noise_map = opt['network_g'].get('use_noise_map', False)
-        print(f"Configured use_noise_map: {self.use_noise_map}")
+        self.use_texture_detection = opt['network_g'].get('use_texture_detection', False)
+        logger = get_root_logger()
+        logger.info(f"Configured use_noise_map: {self.use_noise_map}")
+        logger.info(f"Configured texture_detector: {self.use_texture_detection}")
 
         self.net_g = self.model_to_device(self.net_g)
         self.print_network(self.net_g)
@@ -118,7 +122,15 @@ class DualPathModel(RAWBaseModel):
 
         # define losses
         if train_opt.get('pixel_opt'):
-            self.cri_pix = build_loss(train_opt['pixel_opt']).to(self.device)
+            if self.use_texture_detection and train_opt.get('adaptive_loss', True):
+                # 使用纹理自适应损失
+                train_opt['pixel_opt']['type'] = 'AdaptiveTextureLoss'
+                self.cri_pix = build_loss(train_opt['pixel_opt']).to(self.device)
+                logger = get_root_logger()
+                logger.info("use AdaptiveTextureLoss")
+            else:
+                # 使用标准损失函数
+                self.cri_pix = build_loss(train_opt['pixel_opt']).to(self.device)
         else:
             self.cri_pix = None
 
@@ -185,11 +197,13 @@ class DualPathModel(RAWBaseModel):
         self.optimizer_g.zero_grad()
 
         noise_map = None
+        texture_mask = None
 
-        print("\n==== OPTIMIZE PARAMETERS ====")
-        print(f"Input lq shape: {self.lq.shape}")
-        print(f"Using use_noise_map: {self.use_noise_map}")
+        # print("\n==== OPTIMIZE PARAMETERS ====")
+        # print(f"Input lq shape: {self.lq.shape}")
+        # print(f"Using use_noise_map: {self.use_noise_map}")
 
+        # 使用噪声生成器生成训练数据（如果有）
         if hasattr(self, 'noise_g'):
             self.camera_id = torch.randint(0, len(self.noise_g), (1,)).item()
             with torch.no_grad():
@@ -200,26 +214,26 @@ class DualPathModel(RAWBaseModel):
                 if 'cam' in self.curr_metadata:
                     self.camera_name = self.curr_metadata['cam']
 
+                # 如果网络支持噪声图，则生成噪声图
                 if self.use_noise_map:
                     noise_map = self.generate_noise_map_from_metadata(self.lq, self.curr_metadata['noise_params'])
 
+                # 数据增强
                 if hasattr(self, 'augment') and self.augment is not None:
                     self.gt, self.lq = self.augment(self.gt, self.lq)
                     if noise_map is not None:
+                        # 对噪声图进行相同的增强
                         noise_map = self.augment(noise_map)[0]
 
+        # 如果没有噪声生成器但需要噪声图，使用ISO计算（测试时或特定场景）
         elif self.use_noise_map and hasattr(self, 'iso') and self.iso is not None:
             noise_map = self.generate_noise_map_from_iso(self.lq, self.iso)
-
-        print(f"Final forward call parameters: lq shape={self.lq.shape}, noise_map={'None' if noise_map is None else noise_map.shape}")
         if self.use_amp:
             with autocast():
                 if noise_map is not None and self.use_noise_map:
                     self.output = self.net_g(self.lq, noise_map)
                 else:
                     self.output = self.net_g(self.lq)
-
-                print(f"Output shape: {self.output.shape}")
 
                 l_total = 0
                 loss_dict = OrderedDict()
@@ -258,8 +272,6 @@ class DualPathModel(RAWBaseModel):
                 self.output = self.net_g(self.lq, noise_map)
             else:
                 self.output = self.net_g(self.lq)
-
-            print(f"Output shape: {self.output.shape}")
 
             l_total = 0
             loss_dict = OrderedDict()
