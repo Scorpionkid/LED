@@ -24,7 +24,7 @@ class DynamicFusion(nn.Module):
         self.register_buffer('min_factor', torch.tensor(0.0))
         self.register_buffer('max_factor', torch.tensor(1.0))
 
-    def forward(self, detail_path, denoise_path, features, texture_mask=None, noise_map=None):
+    def forward(self, detail_path, denoise_path, features, noise_map=None, texture_mask=None):
         """
         Args:
             detail_path: detail path output

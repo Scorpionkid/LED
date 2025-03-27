@@ -172,7 +172,7 @@ class DualPathUNet(nn.Module):
         # texture_detector
         if use_texture_detection:
             self.texture_detector = RAWTextureDetector(
-                window_sizes=[5, 9, 15],  # 多尺度窗口大小
+                window_sizes=[11, 25, 49],  # 多尺度窗口大小
                 base_lower_thresh=0.05,   # 标准差基础低阈值
                 base_upper_thresh=0.2,    # 标准差基础高阈值
                 adaptive_thresh=True,     # 使用自适应阈值
@@ -211,10 +211,10 @@ class DualPathUNet(nn.Module):
             self.sharpness_recovery = SharpnessRecovery(out_channels, use_noise_map, use_texture_detection, sharpness_texture_boost=texture_params.get('sharpness_texture_boost', 0.3))
 
     def forward(self, x, noise_map=None, texture_mask=None):
-        # print("\n==== DUALPATHNET FORWARD ====")
-        # print(f"Input x shape: {x.shape}")
-        # print(f"Input noise_map: {'None' if noise_map is None else noise_map.shape}")
-        # print(f"self.use_noise_map: {self.use_noise_map}")
+        print("\n==== DUALPATHNET FORWARD ====")
+        print(f"Input x shape: {x.shape}")
+        print(f"Input noise_map: {'None' if noise_map is None else noise_map.shape}")
+        print(f"self.use_noise_map: {self.use_noise_map}")
 
         nmp.detect_nan(x, "input image")
 
@@ -230,13 +230,13 @@ class DualPathUNet(nn.Module):
             nmp.detect_nan(texture_mask, "纹理掩码")
 
             texture_masks = nmp.create_multiscale_maps(
-                texture_mask, scales=[1, 2, 4, 8]
+                texture_mask, scales=[1, 2, 4, 6]
             )
             texture_masks = {
                 'original': texture_masks['scale_1'],
                 'down1': texture_masks['scale_2'],
                 'down2': texture_masks['scale_4'],
-                'down3': texture_masks['scale_8']
+                'down3': texture_masks['scale_6']
             }
         else:
             computed_texture_mask = None
@@ -246,13 +246,13 @@ class DualPathUNet(nn.Module):
         if self.use_noise_map and noise_map is not None:
             # noise map for different size
             noise_maps = nmp.create_multiscale_maps(
-                noise_map, scales=[1, 2, 4, 8]
+                noise_map, scales=[1, 2, 4, 6]
             )
             noise_maps = {
                 'original': noise_maps['scale_1'],
                 'down1': noise_maps['scale_2'],
                 'down2': noise_maps['scale_4'],
-                'down3': noise_maps['scale_8']
+                'down3': noise_maps['scale_6']
             }
             # x_input = torch.cat([x, noise_map], dim=1)
             x_input = x
@@ -261,7 +261,7 @@ class DualPathUNet(nn.Module):
             noise_maps = {k: None for k in ['original', 'down1', 'down2', 'down3']}
             x_input = x
 
-        # print(f"x_input shape: {x_input.shape}")
+        print(f"x_input shape: {x_input.shape}")
 
         #--------------------------- ENCODER PATH ---------------------------#
 

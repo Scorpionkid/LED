@@ -15,6 +15,7 @@ class AdaptiveTextureLoss(nn.Module):
     对纹理区域和平坦区域应用不同权重和类型的损失
 
     Args:
+        loss_weight()
         pixel_loss_type (str): 像素损失类型，'l1'或'l2'
         flat_weight (float): 平坦区域的损失权重
         texture_weight (float): 纹理区域的损失权重
@@ -25,12 +26,12 @@ class AdaptiveTextureLoss(nn.Module):
     """
     def __init__(self, pixel_loss_type='l1', flat_weight=1.0, texture_weight=1.0,
                  perceptual_weight=0.1, gradient_weight=0.1, texture_threshold=0.5,
-                 use_dynamic_weights=True, reduction='mean'):
+                 use_dynamic_weights=True, reduction='mean', loss_weight=1.0):
         super(AdaptiveTextureLoss, self).__init__()
-        self.flat_weight = flat_weight
-        self.texture_weight = texture_weight
-        self.perceptual_weight = perceptual_weight
-        self.gradient_weight = gradient_weight
+        self.flat_weight = flat_weight * loss_weight
+        self.texture_weight = texture_weight * loss_weight
+        self.perceptual_weight = perceptual_weight * loss_weight
+        self.gradient_weight = gradient_weight * loss_weight
         self.texture_threshold = texture_threshold
         self.reduction = reduction
         self.use_dynamic_weights = use_dynamic_weights

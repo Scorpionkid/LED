@@ -118,58 +118,78 @@ def apply_to_module(tensor, module, noise_map=None, texture_mask=None,
     # Check for NaN in input tensor
     detect_nan(tensor, f"input to {module.__class__.__name__}")
 
+    # Adjust channels if needed
+    if target_channels is None:
+        target_channels = tensor.size(1)
+
     # Prepare noise map if provided
     if noise_map is not None:
         # Check for NaN in noise map
         detect_nan(noise_map, f"noise map for {module.__class__.__name__}")
 
-        # Adjust channels if needed
-        if target_channels is None:
-            target_channels = tensor.size(1)
-
-        if noise_map.size(1) != target_channels:
-            noise_map = adjust_channels(noise_map, target_channels)
-
         # Check spatial dimensions - should match input tensor
         if noise_map.shape[2:] != tensor.shape[2:]:
             raise ValueError(f"Noise map spatial dimensions {noise_map.shape[2:]} do not match "
-                           f"input tensor dimensions {tensor.shape[2:]} for module {module.__class__.__name__}")
+                        f"input tensor dimensions {tensor.shape[2:]} for module {module.__class__.__name__}")
+
 
     # Prepare texture_mask if provided
     if texture_mask is not None:
         # Check for NaN in texture mask
         detect_nan(texture_mask, f"texture mask for {module.__class__.__name__}")
 
-        # Only adjust channel dimension if needed
-        if target_channels is not None and texture_mask.size(1) != target_channels:
-            texture_mask = adjust_channels(texture_mask, target_channels)
-
         # Check spatial dimensions - should match input tensor
         if texture_mask.shape[2:] != tensor.shape[2:]:
             raise ValueError(f"Texture mask spatial dimensions {texture_mask.shape[2:]} do not match "
-                           f"input tensor dimensions {tensor.shape[2:]} for module {module.__class__.__name__}")
+                        f"input tensor dimensions {tensor.shape[2:]} for module {module.__class__.__name__}")
+
+
+    # if hasattr(module, 'forward'):
+    #     params = module.forward.__code__.co_varnames
+
+    #     # 检查模块的类名，为不同类型模块采用不同处理策略
+    #     module_name = module.__class__.__name__
+
+    #     # 对特定模块保持掩码的单通道特性
+    #     if module_name in ['HighFrequencyAttention', 'AdaptiveDenoiseGate',
+    #                        'DynamicFusion', 'SharpnessRecovery', 'function']:
+            # 这些模块需要单通道掩码，不进行通道扩展
+        if noise_map is not None and noise_map.size(1) > 1:
+            # 如果已经扩展了通道，取第一个通道或平均
+            noise_map = torch.mean(noise_map, dim=1, keepdim=True)
+
+        if texture_mask is not None and texture_mask.size(1) > 1:
+            texture_mask = torch.mean(texture_mask, dim=1, keepdim=True)
+        # elif target_channels is not None:
+            # 其他模块可能需要通道扩展
+            # if noise_map is not None and noise_map.size(1) != target_channels:
+            #     noise_map = adjust_channels(noise_map, target_channels)
+
+            # if texture_mask is not None and texture_mask.size(1) != target_channels:
+            #     texture_mask = adjust_channels(texture_mask, target_channels)
+
 
     # Apply module
     try:
         # Determine which forward signature to use based on module interface
-        if hasattr(module, 'forward'):
-            params = module.forward.__code__.co_varnames
+        # if hasattr(module, 'forward'):
+        #     params = module.forward.__code__.co_varnames
 
-            if 'texture_mask' in params and 'noise_map' in params:
+            # if 'texture_mask' in params and 'noise_map' in params:
                 # Module accepts both texture_mask and noise_map
-                result = module(tensor, noise_map, texture_mask)
-            elif 'texture_mask' in params:
-                # Module accepts texture_mask but not noise_map
-                result = module(tensor, texture_mask)
-            elif 'noise_map' in params:
-                # Module accepts noise_map but not texture_mask
-                result = module(tensor, noise_map)
-            else:
-                # Basic module with no special parameters
-                result = module(tensor)
-        else:
-            # Fallback for callable objects without explicit forward method
-            result = module(tensor)
+        result = module(tensor, noise_map, texture_mask)
+            # elif 'texture_mask' in params:
+            #     # Module accepts texture_mask but not noise_map
+            #     result = module(tensor, texture_mask)
+            # elif 'noise_map' in params:
+            #     # Module accepts noise_map but not texture_mask
+            #     result = module(tensor, noise_map)
+            # else:
+            #     # Basic module with no special parameters
+            #     result = module(tensor)
+        # else:
+        #     # Fallback for callable objects without explicit forward method
+        #     result = module(tensor)
 
         # Check for NaN in output
         detect_nan(result, f"output from {module.__class__.__name__}")

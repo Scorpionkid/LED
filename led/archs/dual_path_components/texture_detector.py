@@ -12,7 +12,7 @@ class RAWTextureDetector(nn.Module):
         adaptive_thresh (bool): 是否使用自适应阈值
         raw_channels (int): RAW图像的通道数，默认为4 (RGGB)
     """
-    def __init__(self, window_sizes=[5, 9, 15], base_lower_thresh=0.05,
+    def __init__(self, window_sizes=[11, 25, 49], base_lower_thresh=0.05,
                  base_upper_thresh=0.2, adaptive_thresh=True, raw_channels=4):
         super(RAWTextureDetector, self).__init__()
         self.window_sizes = window_sizes

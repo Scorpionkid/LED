@@ -247,9 +247,9 @@ class DualPathModel(RAWBaseModel):
         else:
 
             if self.use_texture_detection:
-                self.output, self.texture_mask = self.net_g(**input)
+                self.output, self.texture_mask = self.net_g(**inputs)
             else:
-                self.output, _ = self.net_g(**input)
+                self.output, _ = self.net_g(**inputs)
 
             l_total = 0
             loss_dict = OrderedDict()
@@ -293,9 +293,9 @@ class DualPathModel(RAWBaseModel):
             with torch.no_grad():
 
                 if self.use_texture_detection:
-                    self.output, self.texture_mask = self.net_g_ema(**input)
+                    self.output, self.texture_mask = self.net_g_ema(**inputs)
                 else:
-                    self.output, _ = self.net_g_ema(**input)
+                    self.output, _ = self.net_g_ema(**inputs)
 
                 if self.corrector is not None:
                     self.output = self.corrector(self.output, self.gt)
@@ -304,9 +304,9 @@ class DualPathModel(RAWBaseModel):
             with torch.no_grad():
 
                 if self.use_texture_detection:
-                    self.output, self.texture_mask = self.net_g_ema(**input)
+                    self.output, self.texture_mask = self.net_g_ema(**inputs)
                 else:
-                    self.output, _ = self.net_g_ema(**input)
+                    self.output, _ = self.net_g_ema(**inputs)
 
                 if self.corrector is not None:
                     self.output = self.corrector(self.output, self.gt)
@@ -346,7 +346,7 @@ class DualPathModel(RAWBaseModel):
         )
 
     def _prepare_inputs(self, lq, noise_map=None):
-        inputs = {'lq': lq}
+        inputs = {'x': lq}
 
         # 处理噪声图
         if self.use_noise_map:
