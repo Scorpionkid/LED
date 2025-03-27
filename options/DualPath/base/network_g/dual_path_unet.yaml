@@ -8,3 +8,9 @@ network_g:
   use_sharpness_recovery: true
   use_noise_map: false
   use_texture_detection: false
+
+  texture_params:
+    texture_gate: 0.5           # HighFrequencyAttention中的纹理门控因子
+    texture_suppress_factor: 0.7 # AdaptiveDenoiseGate中的纹理抑制因子
+    fusion_texture_boost: 0.5    # DynamicFusion中的纹理增强因子
+    sharpness_texture_boost: 0.3  # SharpnessRecovery中的纹理增强因子

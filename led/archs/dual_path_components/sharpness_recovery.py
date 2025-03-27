@@ -49,7 +49,7 @@ class AdaptiveUnsharpMask(nn.Module):
 
 
 class SharpnessRecovery(nn.Module):
-    def __init__(self, in_channels=4, use_noise_map=False, use_texture_mask=False):
+    def __init__(self, in_channels=4, use_noise_map=False, use_texture_mask=False, sharpness_texture_boost=0.3):
         super(SharpnessRecovery, self).__init__()
         self.use_noise_map = use_noise_map
         self.use_texture_mask = use_texture_mask
@@ -64,7 +64,7 @@ class SharpnessRecovery(nn.Module):
                 nn.Conv2d(8, 1, 3, padding=1),
                 nn.Sigmoid()
             )
-            self.texture_boost = nn.Parameter(torch.tensor(0.3))
+            self.texture_boost = nn.Parameter(torch.tensor(sharpness_texture_boost))
 
     def forward(self, x, noise_map=None, texture_mask=None):
 

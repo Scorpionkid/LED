@@ -15,28 +15,34 @@ from .dual_path_components import (
 class DualPathBlock(nn.Module):
     """double path block, including detail path and denoising path"""
     def __init__(self, in_channels, out_channels, use_noise_map=False,
-                use_texture_detection=False):
+                use_texture_detection=False, texture_params=None):
         super(DualPathBlock, self).__init__()
 
         # shared feature extraction
         self.features = nn.Conv2d(in_channels, out_channels, 3, padding=1)
         self.activation = nn.LeakyReLU(0.2, inplace=True)
 
+        texture_params = texture_params or {}
+
         # detail path
         self.detail_path = nn.Sequential(
             DilatedConvChain(out_channels),
-            HighFrequencyAttention(out_channels, use_noise_map, use_texture_detection)
+            HighFrequencyAttention(out_channels, use_noise_map, use_texture_detection,
+                                   texture_gate=texture_params.get('texture_gate', 0.5))
         )
 
         # denoising path gate mechanism
-        self.denoise_gate = AdaptiveDenoiseGate(out_channels, use_noise_map, use_texture_detection)
+        self.denoise_gate = AdaptiveDenoiseGate(out_channels, use_noise_map, use_texture_detection,
+                                                texture_suppress_factor=texture_params.get('texture_suppress_factor', 0.7)
+        )
 
         # denoising path residual learning
         self.residual_denoiser = ResidualDenoiser(out_channels)
 
         # dynamic fusion layer
         if use_texture_detection:
-            self.fusion = DynamicFusion(out_channels, use_noise_map, use_texture_detection)
+            self.fusion = DynamicFusion(out_channels, use_noise_map, use_texture_detection,
+                                        fusion_texture_boost=texture_params.get('fusion_texture_boost', 0.5))
         else:
             self.fusion = DynamicFusion(out_channels, use_noise_map)
 
@@ -141,7 +147,7 @@ class DualPathUNet(nn.Module):
     def __init__(self, in_channels=4, out_channels=4, base_channels=64,
                  dilated_rates=None, use_wavelet_upsample=True,
                  use_sharpness_recovery=True, use_noise_map=False,
-                 use_texture_detection=False):
+                 use_texture_detection=False, texture_params=None):
         super(DualPathUNet, self).__init__()
 
         self.base_channels = base_channels
@@ -149,6 +155,15 @@ class DualPathUNet(nn.Module):
         self.use_wavelet_upsample = use_wavelet_upsample
         self.use_sharpness_recovery = use_sharpness_recovery
         self.use_texture_detection = use_texture_detection
+
+        self.texture_params = {
+            'texture_gate': 0.5,
+            'texture_suppress_factor': 0.7,
+            'fusion_texture_boost': 0.5,
+            'sharpness_texture_boost': 0.3
+        }
+        if texture_params is not None:
+            self.texture_params.update(texture_params)
 
         # enc1_in_channels = in_channels * 2 if use_noise_map else in_channels
         enc1_in_channels = in_channels
@@ -165,17 +180,17 @@ class DualPathUNet(nn.Module):
             )
 
         # encoder
-        self.enc1 = DualPathBlock(enc1_in_channels, base_channels, use_noise_map, use_texture_detection)
-        self.enc2 = DualPathBlock(base_channels, base_channels*2, use_noise_map, use_texture_detection)
-        self.enc3 = DualPathBlock(base_channels*2, base_channels*4, use_noise_map, use_texture_detection)
+        self.enc1 = DualPathBlock(enc1_in_channels, base_channels, use_noise_map, use_texture_detection, self.texture_params)
+        self.enc2 = DualPathBlock(base_channels, base_channels*2, use_noise_map, use_texture_detection, self.texture_params)
+        self.enc3 = DualPathBlock(base_channels*2, base_channels*4, use_noise_map, use_texture_detection, self.texture_params)
 
         # bottleneck
-        self.bottleneck = DualPathBlock(base_channels*4, base_channels*8, use_noise_map, use_texture_detection)
+        self.bottleneck = DualPathBlock(base_channels*4, base_channels*8, use_noise_map, use_texture_detection, self.texture_params)
 
         # decoder
-        self.dec3 = DualPathBlock(base_channels*4+base_channels*4, base_channels*4, use_noise_map, use_texture_detection)
-        self.dec2 = DualPathBlock(base_channels*2+base_channels*2, base_channels*2, use_noise_map, use_texture_detection)
-        self.dec1 = DualPathBlock(base_channels+base_channels, base_channels, use_noise_map, use_texture_detection)
+        self.dec3 = DualPathBlock(base_channels*4+base_channels*4, base_channels*4, use_noise_map, use_texture_detection, self.texture_params)
+        self.dec2 = DualPathBlock(base_channels*2+base_channels*2, base_channels*2, use_noise_map, use_texture_detection, self.texture_params)
+        self.dec1 = DualPathBlock(base_channels+base_channels, base_channels, use_noise_map, use_texture_detection, self.texture_params)
 
         # downsample and upsample
         self.down = nn.MaxPool2d(2)
@@ -193,7 +208,7 @@ class DualPathUNet(nn.Module):
 
         # sharpness recovery
         if use_sharpness_recovery:
-            self.sharpness_recovery = SharpnessRecovery(out_channels, use_noise_map, use_texture_detection)
+            self.sharpness_recovery = SharpnessRecovery(out_channels, use_noise_map, use_texture_detection, sharpness_texture_boost=texture_params.get('sharpness_texture_boost', 0.3))
 
     def forward(self, x, noise_map=None, texture_mask=None):
         # print("\n==== DUALPATHNET FORWARD ====")
@@ -207,6 +222,10 @@ class DualPathUNet(nn.Module):
             nmp.detect_nan(noise_map, "input noise map")
 
         if self.use_texture_detection:
+            computed_texture_mask = self.texture_detector(x, noise_map)
+            if texture_mask is None:
+                texture_mask = computed_texture_mask
+
             texture_mask = self.texture_detector(x, noise_map)
             nmp.detect_nan(texture_mask, "纹理掩码")
 
@@ -220,6 +239,7 @@ class DualPathUNet(nn.Module):
                 'down3': texture_masks['scale_8']
             }
         else:
+            computed_texture_mask = None
             texture_masks = {k: None for k in ['original', 'down1', 'down2', 'down3']}
 
         # concatenate noise map if needed
@@ -310,4 +330,4 @@ class DualPathUNet(nn.Module):
                 out.size(1)
             )
 
-        return out
+        return out, computed_texture_mask

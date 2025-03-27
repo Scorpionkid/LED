@@ -52,7 +52,7 @@ class DilatedConvChain(nn.Module):
 
 class HighFrequencyAttention(nn.Module):
     # High-frequency attention module, focusing on edge and texture information in the image
-    def __init__(self, channels, use_noise_map=False, use_texture_mask=False):
+    def __init__(self, channels, use_noise_map=False, use_texture_mask=False, texture_gate=0.5):
         super(HighFrequencyAttention, self).__init__()
         self.edge_detector = SobelFilter()
         self.conv_edge = nn.Conv2d(channels, channels, 3, padding=1)
@@ -72,7 +72,7 @@ class HighFrequencyAttention(nn.Module):
                 nn.LeakyReLU(0.2, inplace=True),
                 nn.Conv2d(channels, channels, 3, padding=1)
             )
-            self.texture_gate = nn.Parameter(torch.tensor(0.5))
+            self.texture_gate = nn.Parameter(torch.tensor(texture_gate))
 
     def forward(self, x, noise_map=None, texture_mask=None):
         # Edge detection

@@ -4,7 +4,7 @@ import torch.nn.functional as F
 
 class AdaptiveDenoiseGate(nn.Module):
     """Adaptive gating mechanism to adjust denoising strength based on local noise characteristics"""
-    def __init__(self, channels, use_noise_map=False, use_texture_mask=False):
+    def __init__(self, channels, use_noise_map=False, use_texture_mask=False, texture_suppress_factor=0.7):
         super(AdaptiveDenoiseGate, self).__init__()
         self.use_noise_map = use_noise_map
         self.use_texture_mask = use_texture_mask
@@ -26,7 +26,7 @@ class AdaptiveDenoiseGate(nn.Module):
                 nn.Sigmoid()
             )
             # 纹理抑制因子（降低纹理区域的去噪强度）
-            self.texture_suppress_factor = nn.Parameter(torch.tensor(0.7))  # 初始值0.7
+            self.texture_suppress_factor = nn.Parameter(torch.tensor(texture_suppress_factor))
     def forward(self, x, noise_map=None, texture_mask=None):
         """
         Args:

@@ -196,51 +196,28 @@ class DualPathModel(RAWBaseModel):
         #     self.optimizer_g.zero_grad()
         self.optimizer_g.zero_grad()
 
-        noise_map = None
-        texture_mask = None
-
         # print("\n==== OPTIMIZE PARAMETERS ====")
         # print(f"Input lq shape: {self.lq.shape}")
         # print(f"Using use_noise_map: {self.use_noise_map}")
 
-        # 使用噪声生成器生成训练数据（如果有）
-        if hasattr(self, 'noise_g'):
-            self.camera_id = torch.randint(0, len(self.noise_g), (1,)).item()
-            with torch.no_grad():
-                scale = self.white_level - self.black_level
-                self.gt = (self.gt - self.black_level) / scale
-                self.gt, self.lq, self.curr_metadata = self.noise_g(self.gt, scale, self.ratio, self.camera_id)
+        inputs = self._prepare_inputs(self.lq)
 
-                if 'cam' in self.curr_metadata:
-                    self.camera_name = self.curr_metadata['cam']
-
-                # 如果网络支持噪声图，则生成噪声图
-                if self.use_noise_map:
-                    noise_map = self.generate_noise_map_from_metadata(self.lq, self.curr_metadata['noise_params'])
-
-                # 数据增强
-                if hasattr(self, 'augment') and self.augment is not None:
-                    self.gt, self.lq = self.augment(self.gt, self.lq)
-                    if noise_map is not None:
-                        # 对噪声图进行相同的增强
-                        noise_map = self.augment(noise_map)[0]
-
-        # 如果没有噪声生成器但需要噪声图，使用ISO计算（测试时或特定场景）
-        elif self.use_noise_map and hasattr(self, 'iso') and self.iso is not None:
-            noise_map = self.generate_noise_map_from_iso(self.lq, self.iso)
         if self.use_amp:
             with autocast():
-                if noise_map is not None and self.use_noise_map:
-                    self.output = self.net_g(self.lq, noise_map)
+                if self.use_texture_detection:
+                    self.output, self.texture_mask = self.net_g(**inputs)
                 else:
-                    self.output = self.net_g(self.lq)
+                    self.output, _ = self.net_g(**inputs)
 
                 l_total = 0
                 loss_dict = OrderedDict()
 
                 # pixel loss
                 if self.cri_pix:
-                    l_pix = self.cri_pix(self.output, self.gt)
+                    if self.use_texture_detection and hasattr(self.cri_pix, 'forward') and 'texture_mask' in self.cri_pix.forward.__code__.co_varnames:
+                        l_pix = self.cri_pix(self.output, self.gt, texture_mask=self.texture_mask)
+                    else:
+                        l_pix = self.cri_pix(self.output, self.gt)
                     l_total += l_pix
                     loss_dict['l_pix'] = l_pix
 
@@ -268,17 +245,21 @@ class DualPathModel(RAWBaseModel):
                 if self.ema_decay > 0:
                     self.model_ema(decay=self.ema_decay)
         else:
-            if noise_map is not None and self.use_noise_map:
-                self.output = self.net_g(self.lq, noise_map)
+
+            if self.use_texture_detection:
+                self.output, self.texture_mask = self.net_g(**input)
             else:
-                self.output = self.net_g(self.lq)
+                self.output, _ = self.net_g(**input)
 
             l_total = 0
             loss_dict = OrderedDict()
 
             # pixel loss
             if self.cri_pix:
-                l_pix = self.cri_pix(self.output, self.gt)
+                if self.use_texture_detection and hasattr(self.cri_pix, 'forward') and 'texture_mask' in self.cri_pix.forward.__code__.co_varnames:
+                    l_pix = self.cri_pix(self.output, self.gt, texture_mask=self.texture_mask)
+                else:
+                    l_pix = self.cri_pix(self.output, self.gt)
                 l_total += l_pix
                 loss_dict['l_pix'] = l_pix
 
@@ -305,26 +286,27 @@ class DualPathModel(RAWBaseModel):
     def test(self):
         """Forward function used in testing."""
         # noise map
-        noise_map = None
-        if self.use_noise_map and hasattr(self, 'iso') and self.iso is not None:
-            noise_map = self.generate_noise_map_from_iso(self.lq, self.iso)
+        inputs = self._prepare_inputs(self.lq)
+
         if hasattr(self, 'net_g_ema'):
             self.net_g_ema.eval()
             with torch.no_grad():
-                if noise_map is not None and self.use_noise_map:
-                    self.output = self.net_g_ema(self.lq, noise_map)
+
+                if self.use_texture_detection:
+                    self.output, self.texture_mask = self.net_g_ema(**input)
                 else:
-                    self.output = self.net_g_ema(self.lq)
+                    self.output, _ = self.net_g_ema(**input)
 
                 if self.corrector is not None:
                     self.output = self.corrector(self.output, self.gt)
         else:
             self.net_g.eval()
             with torch.no_grad():
-                if noise_map is not None and self.use_noise_map:
-                    self.output = self.net_g(self.lq, noise_map)
+
+                if self.use_texture_detection:
+                    self.output, self.texture_mask = self.net_g_ema(**input)
                 else:
-                    self.output = self.net_g(self.lq)
+                    self.output, _ = self.net_g_ema(**input)
 
                 if self.corrector is not None:
                     self.output = self.corrector(self.output, self.gt)
@@ -362,3 +344,43 @@ class DualPathModel(RAWBaseModel):
             iso=iso,
             camera_name=getattr(self, 'camera_name', None)
         )
+
+    def _prepare_inputs(self, lq, noise_map=None):
+        inputs = {'lq': lq}
+
+        # 处理噪声图
+        if self.use_noise_map:
+            # 情况1: 如果已提供噪声图，直接使用
+            if noise_map is not None:
+                inputs['noise_map'] = noise_map
+
+            # 情况2: 如果有噪声生成器，使用它生成噪声图和处理图像
+            # 这部分通常在训练阶段使用
+            elif hasattr(self, 'noise_g') and self.training:
+                self.camera_id = torch.randint(0, len(self.noise_g), (1,)).item()
+                with torch.no_grad():
+                    scale = self.white_level - self.black_level
+                    self.gt = (self.gt - self.black_level) / scale
+                    self.gt, self.lq, self.curr_metadata = self.noise_g(self.gt, scale, self.ratio, self.camera_id)
+
+                    if 'cam' in self.curr_metadata:
+                        self.camera_name = self.curr_metadata['cam']
+
+                    # 生成噪声图
+                    inputs['noise_map'] = self.generate_noise_map_from_metadata(self.lq, self.curr_metadata['noise_params'])
+
+                    # 更新输入的lq
+                    inputs['lq'] = self.lq
+
+                    # 数据增强
+                    if hasattr(self, 'augment') and self.augment is not None:
+                        self.gt, inputs['lq'] = self.augment(self.gt, inputs['lq'])
+                        if inputs['noise_map'] is not None:
+                            # 对噪声图进行相同的增强
+                            inputs['noise_map'] = self.augment(inputs['noise_map'])[0]
+
+            # 情况3: 使用ISO生成噪声图（通常用于测试/推理）
+            elif hasattr(self, 'iso') and self.iso is not None:
+                inputs['noise_map'] = self.generate_noise_map_from_iso(lq, self.iso)
+
+        return inputs

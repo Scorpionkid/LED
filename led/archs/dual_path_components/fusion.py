@@ -3,7 +3,7 @@ import torch.nn as nn
 
 class DynamicFusion(nn.Module):
     # Dynamic fusion layer, adaptively adjust fusion weights based on content complexity
-    def __init__(self, channels, use_noise_map=False, use_texture_mask=True):
+    def __init__(self, channels, use_noise_map=False, use_texture_mask=True, fusion_texture_boost=0.5):
         super(DynamicFusion, self).__init__()
         self.use_noise_map = use_noise_map
         self.use_texture_mask = use_texture_mask
@@ -18,8 +18,7 @@ class DynamicFusion(nn.Module):
             nn.Sigmoid()
         )
 
-        # 自适应纹理增强因子 - 可学习参数
-        self.texture_boost_factor = nn.Parameter(torch.tensor(0.5))  # 初始值0.5
+        self.texture_boost_factor = nn.Parameter(torch.tensor(fusion_texture_boost))
 
         # 确保参数在合理范围
         self.register_buffer('min_factor', torch.tensor(0.0))
