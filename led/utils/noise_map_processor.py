@@ -95,6 +95,8 @@ def create_multiscale_maps(noise_map, scales=[1, 2, 4, 8]):
 
 def apply_to_module(tensor, module, noise_map=None, texture_mask=None,
                     target_channels=None):
+def apply_to_module(tensor, module, noise_map=None, texture_mask=None,
+                    target_channels=None):
     """
     Process input tensor and noise map before passing to a module.
 
@@ -106,12 +108,17 @@ def apply_to_module(tensor, module, noise_map=None, texture_mask=None,
         noise_map (Tensor, optional): Noise map tensor
         target_channels (int, optional): Target channel count for noise map
         texture_mask (Tensor, optional): Texture mask tensor
+        texture_mask (Tensor, optional): Texture mask tensor
 
     Returns:
         Tensor: Result from module execution
     """
     module_name = module.__class__.__name__ if hasattr(module, '__class__') else type(module).__name__
     detect_nan(tensor, f"input to {module_name}")
+
+    # Adjust channels if needed
+    if target_channels is None:
+        target_channels = tensor.size(1)
 
     # Adjust channels if needed
     if target_channels is None:

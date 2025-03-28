@@ -1,7 +1,6 @@
 import torch
 from collections import OrderedDict
 from copy import deepcopy
-from os import path as osp
 
 from led.archs import build_network
 from led.losses import build_loss
@@ -18,15 +17,16 @@ class DualPathGANModel(DualPathModel):
     """
 
     def __init__(self, opt):
+        # shared attributes(use_noise_map, camera_params, noise_g...)
         super(DualPathGANModel, self).__init__(opt)
 
-        # Initialize discriminator network
         if self.is_train:
             self.init_discriminator()
 
     def init_discriminator(self):
         """Initialize the discriminator network and optimizer for GAN training."""
         train_opt = self.opt['train']
+        logger = get_root_logger()
 
         # Define discriminator network
         self.net_d = build_network(self.opt['network_d'])
@@ -41,21 +41,6 @@ class DualPathGANModel(DualPathModel):
                 self.net_d, load_path, self.opt['path'].get('strict_load_d', True), param_key
             )
 
-        # define noise_g
-        if 'noise_g' in opt:
-            self.noise_g = self.build_noise_g(opt['noise_g'])
-            self.noise_g = self.noise_g.to(self.device)
-            self.print_network(self.noise_g)
-
-            noise_g_path = self.opt['path'].get('predefined_noise_g', None)
-            if noise_g_path is not None:
-                self.load_network(self.noise_g, noise_g_path, self.opt['path'].get('strict_load_g', True), None)
-            logger = get_root_logger()
-            logger.info(f'Sampled Cameras: \n{self.noise_g.log_str}')
-
-            dump_path = os.path.join(self.opt['path']['experiments_root'], 'noise_g.pth')
-            torch.save(self.noise_g.state_dict(), dump_path)
-
         # Set up discriminator optimizer
         if self.opt['train'].get('optim_d'):
             optim_d_params = []
@@ -63,7 +48,6 @@ class DualPathGANModel(DualPathModel):
                 if v.requires_grad:
                     optim_d_params.append(v)
                 else:
-                    logger = get_root_logger()
                     logger.warning(f'Params {k} in discriminator will not be optimized.')
 
             optim_type = train_opt['optim_d'].pop('type')
@@ -74,41 +58,91 @@ class DualPathGANModel(DualPathModel):
 
         # Define GAN loss
         self.cri_gan = build_loss(train_opt['gan_opt']).to(self.device)
-        self.gan_weight = train_opt.get('gan_weight', 1.0)
-
-        # Additional optimizations for GAN training
         self.net_d_iters = train_opt.get('net_d_iters', 1)
+        self.net_d_init_iters = train_opt.get('net_d_init_iters', 0)
         self.net_d_start_iter = train_opt.get('net_d_start_iter', 0)
 
-    def build_noise_g(self, opt):
-        opt = deepcopy(opt)
-        noise_g_class = eval(opt.pop('type'))
-        return noise_g_class(opt, self.device)
+        # GAN weight scheduling parameters
+        self.gan_weight_init = train_opt.get('gan_weight_init', 0.001)
+        self.gan_weight_final = train_opt.get('gan_weight_final', 0.01)
+        self.gan_weight_start_iter = train_opt.get('gan_weight_start_iter', 0)
+        self.gan_weight_end_iter = train_opt.get('gan_weight_end_iter', 100000)
+
+        logger.info(f'GAN training will start at iteration: {self.net_d_start_iter}')
+        logger.info(f'GAN weight will increase from {self.gan_weight_init} at iteration {self.gan_weight_start_iter} to {self.gan_weight_final} at iteration {self.gan_weight_end_iter}')
+        logger.info(f'Noise map usage: {self.use_noise_map}')
+        if hasattr(self, 'camera_name') and self.camera_name:
+            logger.info(f'Using camera: {self.camera_name}')
+
+    def calculate_gan_weight(self, current_iter):
+        """Calculate the current GAN weight based on progressive schedule."""
+        # Before start iter, weight is 0
+        if current_iter < self.net_d_start_iter:
+            return 0.0
+        # Between start iter and weight_start_iter, weight is init value
+        elif current_iter < self.gan_weight_start_iter:
+            return self.gan_weight_init
+        # Between weight_start_iter and weight_end_iter, weight increases linearly
+        elif current_iter <= self.gan_weight_end_iter:
+            progress = (current_iter - self.gan_weight_start_iter) / (self.gan_weight_end_iter - self.gan_weight_start_iter)
+            return self.gan_weight_init + progress * (self.gan_weight_final - self.gan_weight_init)
+        # After weight_end_iter, weight is final value
+        else:
+            return self.gan_weight_final
 
     def optimize_parameters(self, current_iter):
         """Optimize model parameters for one iteration."""
-        # Generate denoised output
-        self.output = self.net_g(self.lq)
+        # Initialize noise_map to None
+        noise_map = None
 
-        # noise generation
-        if hasattr(self, 'noise_g'):
-            self.camera_id = torch.randint(0, len(self.noise_g), (1,)).item()
-            with torch.no_grad():
-                scale = self.white_level - self.black_level
-                self.gt = (self.gt - self.black_level) / scale
-                self.gt, self.lq, self.curr_metadata = self.noise_g(self.gt, scale, self.ratio, self.camera_id)
-                if hasattr(self, 'augment') and self.augment is not None:
-                    self.gt, self.lq = self.augment(self.gt, self.lq)
+        # Generate noise map if needed
+        if self.use_noise_map:
+            # Using noise generator
+            if hasattr(self, 'noise_g'):
+                self.camera_id = torch.randint(0, len(self.noise_g), (1,)).item()
+                with torch.no_grad():
+                    scale = self.white_level - self.black_level
+                    self.gt = (self.gt - self.black_level) / scale
+                    self.gt, self.lq, self.curr_metadata = self.noise_g(self.gt, scale, self.ratio, self.camera_id)
+
+                    if 'cam' in self.curr_metadata:
+                        self.camera_name = self.curr_metadata['cam']
+
+                    # Generate noise map
+                    noise_map = self.generate_noise_map_from_metadata(self.lq, self.curr_metadata['noise_params'])
+
+                    # Data augmentation
+                    if hasattr(self, 'augment') and self.augment is not None:
+                        self.gt, self.lq = self.augment(self.gt, self.lq)
+                        if noise_map is not None:
+                            noise_map = self.augment(noise_map)[0]
+
+            # Using ISO-based noise map (for testing or specific scenarios)
+            elif hasattr(self, 'iso') and self.iso is not None:
+                noise_map = self.generate_noise_map_from_iso(self.lq, self.iso)
+
+        # Calculate current GAN weight based on iteration
+        current_gan_weight = self.calculate_gan_weight(current_iter)
 
         # Optimize discriminator (if GAN training is active)
+        d_loss = 0
         if current_iter >= self.net_d_start_iter:
             # Reset gradients on discriminator
             for p in self.net_d.parameters():
                 p.requires_grad = True
 
+            # Number of D updates - more at the beginning of GAN training
+            d_iters = self.net_d_init_iters if current_iter == self.net_d_start_iter else self.net_d_iters
+
             # Update discriminator for multiple iterations if needed
-            for _ in range(self.net_d_iters):
+            for _ in range(d_iters):
                 self.optimizer_d.zero_grad()
+
+                # Forward generator to get fake images
+                if noise_map is not None and self.use_noise_map:
+                    self.output = self.net_g(self.lq, noise_map)
+                else:
+                    self.output = self.net_g(self.lq)
 
                 # Real detection
                 spatial_real, freq_real = self.net_d(self.gt)
@@ -146,6 +180,13 @@ class DualPathGANModel(DualPathModel):
         # Optimize generator
         self.optimizer_g.zero_grad()
 
+        # Get generator output (if not already computed)
+        if current_iter < self.net_d_start_iter or d_loss == 0:
+            if noise_map is not None and self.use_noise_map:
+                self.output = self.net_g(self.lq, noise_map)
+            else:
+                self.output = self.net_g(self.lq)
+
         # Generator losses
         l_total = 0
         loss_dict = OrderedDict()
@@ -169,7 +210,7 @@ class DualPathGANModel(DualPathModel):
             loss_dict['l_grad'] = l_grad
 
         # GAN loss for generator (only after discriminator starts training)
-        if current_iter >= self.net_d_start_iter:
+        if current_iter >= self.net_d_start_iter and current_gan_weight > 0:
             # Get discriminator results on generated images
             spatial_fake, freq_fake = self.net_d(self.output)
 
@@ -183,7 +224,7 @@ class DualPathGANModel(DualPathModel):
             l_g_gan += self.cri_gan(freq_fake, True, is_disc=False)
 
             # Apply GAN weight
-            l_g_gan = l_g_gan * self.gan_weight
+            l_g_gan = l_g_gan * current_gan_weight
             l_total += l_g_gan
             loss_dict['l_g_gan'] = l_g_gan
 
@@ -198,20 +239,20 @@ class DualPathGANModel(DualPathModel):
         # Log losses
         self.log_dict = self.reduce_loss_dict(loss_dict)
 
+    def test(self):
+        """Forward function used in testing.
+
+        For GAN models, testing only involves the generator part.
+        We don't need the discriminator during inference.
+        """
+        if hasattr(self, 'net_d'):
+            self.net_d.eval()
+
+        super(DualPathGANModel, self).test()
+
+
     def save(self, epoch, current_iter):
         """Save networks and training states."""
-        # Save generator
-        if hasattr(self, 'net_g_ema'):
-            self.save_network(
-                [self.net_g, self.net_g_ema],
-                'net_g', current_iter,
-                param_key=['params', 'params_ema']
-            )
-        else:
-            self.save_network(self.net_g, 'net_g', current_iter)
+        super(DualPathGANModel, self).save(epoch, current_iter)
 
-        # Save discriminator
         self.save_network(self.net_d, 'net_d', current_iter)
-
-        # Save training state
-        self.save_training_state(epoch, current_iter)
