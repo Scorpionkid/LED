@@ -5,6 +5,7 @@ Provides utility functions for handling noise maps in neural networks,
 including channel adjustment, NaN detection, and multi-scale noise map creation.
 """
 
+import inspect
 import torch
 import warnings
 
@@ -92,7 +93,8 @@ def create_multiscale_maps(noise_map, scales=[1, 2, 4, 8]):
 
     return result
 
-def apply_to_module(tensor, module, noise_map=None, target_channels=None):
+def apply_to_module(tensor, module, noise_map=None, texture_mask=None,
+                    target_channels=None):
     """
     Process input tensor and noise map before passing to a module.
 
@@ -103,37 +105,95 @@ def apply_to_module(tensor, module, noise_map=None, target_channels=None):
         module (nn.Module): Neural network module to apply
         noise_map (Tensor, optional): Noise map tensor
         target_channels (int, optional): Target channel count for noise map
+        texture_mask (Tensor, optional): Texture mask tensor
 
     Returns:
         Tensor: Result from module execution
     """
-    # Check for NaN in input tensor
-    detect_nan(tensor, f"input to {module.__class__.__name__}")
+    module_name = module.__class__.__name__ if hasattr(module, '__class__') else type(module).__name__
+    detect_nan(tensor, f"input to {module_name}")
+
+    # Adjust channels if needed
+    if target_channels is None:
+        target_channels = tensor.size(1)
 
     # Prepare noise map if provided
     if noise_map is not None:
         # Check for NaN in noise map
         detect_nan(noise_map, f"noise map for {module.__class__.__name__}")
 
-        # Adjust channels if needed
-        if target_channels is None:
-            target_channels = tensor.size(1)
+        # Check spatial dimensions - should match input tensor
+        if noise_map.shape[2:] != tensor.shape[2:]:
+            raise ValueError(f"Noise map spatial dimensions {noise_map.shape[2:]} do not match "
+                        f"input tensor dimensions {tensor.shape[2:]} for module {module.__class__.__name__}")
 
-        if noise_map.size(1) != target_channels:
-            noise_map = adjust_channels(noise_map, target_channels)
+
+    # Prepare texture_mask if provided
+    if texture_mask is not None:
+        # Check for NaN in texture mask
+        detect_nan(texture_mask, f"texture mask for {module.__class__.__name__}")
+
+        # Check spatial dimensions - should match input tensor
+        if texture_mask.shape[2:] != tensor.shape[2:]:
+            raise ValueError(f"Texture mask spatial dimensions {texture_mask.shape[2:]} do not match "
+                        f"input tensor dimensions {tensor.shape[2:]} for module {module.__class__.__name__}")
+
+
+    if hasattr(module, '__class__'):
+        module_name = module.__class__.__name__
+
+        if module_name in ['HighFrequencyAttention', 'AdaptiveDenoiseGate',
+                          'DynamicFusion', 'SharpnessRecovery'] or module_name == 'function':
+            if noise_map is not None and noise_map.size(1) > 1:
+                noise_map = torch.mean(noise_map, dim=1, keepdim=True)
+
+            if texture_mask is not None and texture_mask.size(1) > 1:
+                texture_mask = torch.mean(texture_mask, dim=1, keepdim=True)
+        elif target_channels is not None:
+            if noise_map is not None and noise_map.size(1) != target_channels:
+                noise_map = adjust_channels(noise_map, target_channels)
+
+            if texture_mask is not None and texture_mask.size(1) != target_channels:
+                texture_mask = adjust_channels(texture_mask, target_channels)
+
 
     # Apply module
     try:
-        if noise_map is not None:
-            result = module(tensor, noise_map)
+        if not callable(module):
+            raise ValueError(f"Module {module} is not callable")
+
+        if hasattr(module, 'forward'):
+            # PyTorch模块 - 使用forward方法的参数
+            sig_params = module.forward.__code__.co_varnames
         else:
+            # 普通可调用对象 - 使用inspect获取参数
+            sig = inspect.signature(module)
+            sig_params = list(sig.parameters.keys())
+
+        # 根据参数决定调用方式
+        if len(sig_params) >= 3 and 'noise_map' in sig_params and 'texture_mask' in sig_params:
+            # 接受noise_map和texture_mask参数
+            result = module(tensor, noise_map, texture_mask)
+        elif len(sig_params) >= 2 and 'noise_map' in sig_params:
+            # 只接受noise_map参数
+            result = module(tensor, noise_map)
+        elif len(sig_params) >= 2 and 'texture_mask' in sig_params:
+            # 只接受texture_mask参数
+            result = module(tensor, texture_mask)
+        else:
+            # 基本模块，只接受一个输入
             result = module(tensor)
 
-        # Check for NaN in output
-        detect_nan(result, f"output from {module.__class__.__name__}")
+        detect_nan(result, f"output from {module_name}")
         return result
 
     except Exception as e:
-        warnings.warn(f"Error applying module {module.__class__.__name__}: {str(e)}")
-        # Return tensor to maintain data flow in case of error
-        return tensor
+        print(f"\n========== EXECUTION HALTED FOR DEBUGGING ==========")
+        print(f"Error occurred in module {module_name}")
+        print(f"Input tensor shape: {tensor.shape}")
+        print(f"Noise map: {'None' if noise_map is None else noise_map.shape}")
+        print(f"Texture mask: {'None' if texture_mask is None else texture_mask.shape}")
+        print(f"Target channels: {target_channels}")
+        print(f"Error: {str(e)}")
+
+        raise RuntimeError(f"Debug halt: Error in {module_name}: {str(e)}")
