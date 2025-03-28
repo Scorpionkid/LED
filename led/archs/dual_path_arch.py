@@ -156,14 +156,6 @@ class DualPathUNet(nn.Module):
         self.use_sharpness_recovery = use_sharpness_recovery
         self.use_texture_detection = use_texture_detection
 
-        self.texture_params = {
-            'texture_gate': 0.5,
-            'texture_suppress_factor': 0.7,
-            'fusion_texture_boost': 0.5,
-            'sharpness_texture_boost': 0.3
-        }
-        if texture_params is not None:
-            self.texture_params.update(texture_params)
 
         # enc1_in_channels = in_channels * 2 if use_noise_map else in_channels
         enc1_in_channels = in_channels
@@ -171,12 +163,30 @@ class DualPathUNet(nn.Module):
         # encoder
         # texture_detector
         if use_texture_detection:
+
+            self.texture_params = {
+                'texture_gate': 0.5,
+                'texture_suppress_factor': 0.7,
+                'fusion_texture_boost': 0.5,
+                'sharpness_texture_boost': 0.3
+            }
+            if texture_params is not None:
+                self.texture_params.update(texture_params)
+
+            # texture_detector params
+            texture_detector_params = texture_params.get('texture_detector_params', {})
+
+            window_sizes = texture_detector_params.get('window_sizes', [5, 9, 17])
+            base_lower_thresh = texture_detector_params.get('base_lower_thresh', 0.05)
+            base_upper_thresh = texture_detector_params.get('base_upper_thresh', 0.2)
+            adaptive_thresh = texture_detector_params.get('adaptive_thresh', True)
+
             self.texture_detector = RAWTextureDetector(
-                window_sizes=[11, 25, 49],  # 多尺度窗口大小
-                base_lower_thresh=0.05,   # 标准差基础低阈值
-                base_upper_thresh=0.2,    # 标准差基础高阈值
-                adaptive_thresh=True,     # 使用自适应阈值
-                raw_channels=in_channels  # RAW图像通道数
+                window_sizes=window_sizes,
+                base_lower_thresh=base_lower_thresh,
+                base_upper_thresh=base_upper_thresh,
+                adaptive_thresh=adaptive_thresh,
+                raw_channels=in_channels
             )
 
         # encoder
@@ -261,7 +271,7 @@ class DualPathUNet(nn.Module):
             noise_maps = {k: None for k in ['original', 'down1', 'down2', 'down3']}
             x_input = x
 
-        print(f"x_input shape: {x_input.shape}")
+        # print(f"x_input shape: {x_input.shape}")
 
         #--------------------------- ENCODER PATH ---------------------------#
 

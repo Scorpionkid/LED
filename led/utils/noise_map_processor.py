@@ -6,6 +6,7 @@ including channel adjustment, NaN detection, and multi-scale noise map creation.
 """
 
 import inspect
+import functools
 import torch
 import warnings
 
@@ -106,17 +107,12 @@ def apply_to_module(tensor, module, noise_map=None, texture_mask=None,
         noise_map (Tensor, optional): Noise map tensor
         target_channels (int, optional): Target channel count for noise map
         texture_mask (Tensor, optional): Texture mask tensor
-        texture_mask (Tensor, optional): Texture mask tensor
 
     Returns:
         Tensor: Result from module execution
     """
     module_name = module.__class__.__name__ if hasattr(module, '__class__') else type(module).__name__
     detect_nan(tensor, f"input to {module_name}")
-
-    # Adjust channels if needed
-    if target_channels is None:
-        target_channels = tensor.size(1)
 
     # Adjust channels if needed
     if target_channels is None:
@@ -165,40 +161,81 @@ def apply_to_module(tensor, module, noise_map=None, texture_mask=None,
     # Apply module
     try:
         if not callable(module):
-            raise ValueError(f"Module {module} is not callable")
+            raise ValueError(f"模块 {module} 不可调用")
 
+        # 获取调用签名和参数
+        if inspect.isfunction(module) or inspect.ismethod(module) or isinstance(module, functools.partial):
+            # 函数、方法或partial对象
+            sig = inspect.signature(module)
+            param_names = list(sig.parameters.keys())
+            param_count = len(param_names)
+
+            # 检查是否是lambda/function - 这些通常使用位置参数
+            is_lambda = module.__name__ == '<lambda>'
+            is_local_func = 'local' in str(module)
+
+            # lambda需要基于参数数量决定调用方式
+            if (is_lambda or is_local_func):
+                if param_count == 1:
+                    return module(tensor)
+                elif param_count == 2 and noise_map is not None:
+                    return module(tensor, noise_map)
+                elif param_count == 2 and texture_mask is not None:
+                    return module(tensor, texture_mask)
+                elif param_count == 3 and noise_map is not None and texture_mask is not None:
+                    return module(tensor, noise_map, texture_mask)
+                else:
+                    # 如果无法确定如何调用，直接使用基本调用并让错误显示
+                    return module(tensor)
+
+        # 检查模块的调用参数
         if hasattr(module, 'forward'):
             # PyTorch模块 - 使用forward方法的参数
-            sig_params = module.forward.__code__.co_varnames
+            sig_params = list(inspect.signature(module.forward).parameters.keys())
+            if sig_params and sig_params[0] == 'self':
+                sig_params = sig_params[1:]  # 移除self参数
         else:
-            # 普通可调用对象 - 使用inspect获取参数
-            sig = inspect.signature(module)
-            sig_params = list(sig.parameters.keys())
+            # 普通可调用对象
+            sig_params = list(inspect.signature(module.__call__ if hasattr(module, '__call__') else module).parameters.keys())
+            if sig_params and sig_params[0] == 'self':
+                sig_params = sig_params[1:]  # 移除self参数
 
         # 根据参数决定调用方式
         if len(sig_params) >= 3 and 'noise_map' in sig_params and 'texture_mask' in sig_params:
             # 接受noise_map和texture_mask参数
-            result = module(tensor, noise_map, texture_mask)
+            return module(tensor, noise_map, texture_mask)
         elif len(sig_params) >= 2 and 'noise_map' in sig_params:
             # 只接受noise_map参数
-            result = module(tensor, noise_map)
+            return module(tensor, noise_map)
         elif len(sig_params) >= 2 and 'texture_mask' in sig_params:
             # 只接受texture_mask参数
-            result = module(tensor, texture_mask)
+            return module(tensor, texture_mask)
         else:
             # 基本模块，只接受一个输入
-            result = module(tensor)
-
-        detect_nan(result, f"output from {module_name}")
-        return result
+            return module(tensor)
 
     except Exception as e:
-        print(f"\n========== EXECUTION HALTED FOR DEBUGGING ==========")
-        print(f"Error occurred in module {module_name}")
-        print(f"Input tensor shape: {tensor.shape}")
-        print(f"Noise map: {'None' if noise_map is None else noise_map.shape}")
-        print(f"Texture mask: {'None' if texture_mask is None else texture_mask.shape}")
-        print(f"Target channels: {target_channels}")
-        print(f"Error: {str(e)}")
+        # 详细的错误报告
+        print(f"\n========== 执行中断用于调试 ==========")
+        print(f"模块 {module_name} 中发生错误")
+        print(f"输入张量形状: {tensor.shape}")
+        print(f"噪声图: {'None' if noise_map is None else noise_map.shape}")
+        print(f"纹理掩码: {'None' if texture_mask is None else texture_mask.shape}")
+        print(f"目标通道: {target_channels}")
+        print(f"错误: {str(e)}")
 
-        raise RuntimeError(f"Debug halt: Error in {module_name}: {str(e)}")
+        # 提供额外信息用于调试
+        if hasattr(module, 'forward'):
+            try:
+                forward_sig = inspect.signature(module.forward)
+                print(f"模块forward方法签名: {forward_sig}")
+            except:
+                pass
+        elif callable(module):
+            try:
+                call_sig = inspect.signature(module)
+                print(f"可调用对象签名: {call_sig}")
+            except:
+                pass
+
+        raise RuntimeError(f"调试中断: {module_name} 中的错误: {str(e)}")

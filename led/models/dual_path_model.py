@@ -304,9 +304,9 @@ class DualPathModel(RAWBaseModel):
             with torch.no_grad():
 
                 if self.use_texture_detection:
-                    self.output, self.texture_mask = self.net_g_ema(**inputs)
+                    self.output, self.texture_mask = self.net_g(**inputs)
                 else:
-                    self.output, _ = self.net_g_ema(**inputs)
+                    self.output, _ = self.net_g(**inputs)
 
                 if self.corrector is not None:
                     self.output = self.corrector(self.output, self.gt)

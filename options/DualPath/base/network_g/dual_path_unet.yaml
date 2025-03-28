@@ -2,7 +2,7 @@ network_g:
   type: DualPathUNet
   in_channels: 4
   out_channels: 4
-  base_channels: 16
+  base_channels: 64
   dilated_rates: [1, 2, 4, 8]
   use_wavelet_upsample: true
   use_sharpness_recovery: true
@@ -14,3 +14,8 @@ network_g:
     texture_suppress_factor: 0.7 # AdaptiveDenoiseGate中的纹理抑制因子
     fusion_texture_boost: 0.5    # DynamicFusion中的纹理增强因子
     sharpness_texture_boost: 0.3  # SharpnessRecovery中的纹理增强因子
+    texture_detector_params:
+      window_sizes: [5, 9, 17]
+      base_lower_thresh: 0.05
+      base_upper_thresh: 0.2
+      adaptive_thresh: true
