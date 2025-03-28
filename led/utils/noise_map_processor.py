@@ -95,8 +95,6 @@ def create_multiscale_maps(noise_map, scales=[1, 2, 4, 8]):
 
 def apply_to_module(tensor, module, noise_map=None, texture_mask=None,
                     target_channels=None):
-def apply_to_module(tensor, module, noise_map=None, texture_mask=None,
-                    target_channels=None):
     """
     Process input tensor and noise map before passing to a module.
 
