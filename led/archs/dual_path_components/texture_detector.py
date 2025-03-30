@@ -80,27 +80,58 @@ class RAWTextureDetector(nn.Module):
 
         return texture_mask
 
+    # def _compute_std_map(self, features, window_size):
+    #     """计算特征的局部标准差图"""
+    #     N, C, H, W = features.shape
+    #     pad = window_size // 2
+
+    #     # 填充边界
+    #     features_padded = F.pad(features, [pad] * 4, mode='reflect')
+
+    #     # 使用unfold提取局部区域
+    #     patches = F.unfold(features_padded, kernel_size=window_size)
+    #     patches = patches.view(N, C, window_size * window_size, H, W)
+
+    #     # 计算标准差
+    #     mean = torch.mean(patches, dim=2, keepdim=True)
+    #     var = torch.mean((patches - mean) ** 2, dim=2)
+    #     std = torch.sqrt(var + 1e-8)  # 添加小值防止数值不稳定
+
+    #     # 在通道维度上聚合
+    #     std = torch.mean(std, dim=1, keepdim=True)
+
+    #     return std
+
     def _compute_std_map(self, features, window_size):
-        """计算特征的局部标准差图"""
+        """内存优化的标准差计算"""
         N, C, H, W = features.shape
         pad = window_size // 2
 
-        # 填充边界
-        features_padded = F.pad(features, [pad] * 4, mode='reflect')
+        # 填充特征图
+        features_padded = F.pad(features, [pad]*4, mode='reflect')
+        result = torch.zeros(N, 1, H, W, device=features.device)
 
-        # 使用unfold提取局部区域
-        patches = F.unfold(features_padded, kernel_size=window_size)
-        patches = patches.view(N, C, window_size * window_size, H, W)
+        # 使用卷积计算局部均值
+        # 创建平均池化核
+        avg_kernel = torch.ones(1, 1, window_size, window_size,
+                            device=features.device) / (window_size**2)
 
-        # 计算标准差
-        mean = torch.mean(patches, dim=2, keepdim=True)
-        var = torch.mean((patches - mean) ** 2, dim=2)
-        std = torch.sqrt(var + 1e-8)  # 添加小值防止数值不稳定
+        for c in range(C):
+            # 分通道处理
+            curr_feat = features_padded[:, c:c+1]
 
-        # 在通道维度上聚合
-        std = torch.mean(std, dim=1, keepdim=True)
+            # 计算局部均值
+            local_mean = F.conv2d(curr_feat, avg_kernel, stride=1, padding=0, groups=1)
 
-        return std
+            # 计算平方差
+            local_mean_sq = F.conv2d(curr_feat**2, avg_kernel, stride=1, padding=0, groups=1)
+            local_var = local_mean_sq - local_mean**2
+
+            # 累加到结果
+            result += torch.sqrt(torch.clamp(local_var, min=1e-8))
+
+        # 求所有通道的平均
+        return result / C
 
     def _compute_adaptive_thresholds(self, x, std_map):
         """计算自适应阈值"""
