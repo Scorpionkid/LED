@@ -121,29 +121,35 @@ class DualPathModel(RAWBaseModel):
             self.net_g_ema.eval()
 
         # define losses
+        #TODO：是否要修改
         if train_opt.get('pixel_opt'):
             if self.use_texture_detection and train_opt.get('adaptive_loss', True):
-                # 使用纹理自适应损失
                 train_opt['pixel_opt']['type'] = 'AdaptiveTextureLoss'
                 self.cri_pix = build_loss(train_opt['pixel_opt']).to(self.device)
+
+                # Disable global perception and gradient loss.
+                self.cri_perceptual = None
+                self.cri_gradient = None
+
                 logger = get_root_logger()
-                logger.info("use AdaptiveTextureLoss")
+                logger.info("Using AdaptiveTextureLoss with integrated perceptual and gradient losses")
+                logger.info("Global perceptual and gradient losses are disabled to avoid duplication")
             else:
-                # 使用标准损失函数
+                # When the texture adaptive loss is not used, use the standard loss configuration.
                 self.cri_pix = build_loss(train_opt['pixel_opt']).to(self.device)
+
+                if train_opt.get('perceptual_opt'):
+                    self.cri_perceptual = build_loss(train_opt['perceptual_opt']).to(self.device)
+                else:
+                    self.cri_perceptual = None
+
+                if train_opt.get('gradient_opt'):
+                    self.cri_gradient = build_loss(train_opt['gradient_opt']).to(self.device)
+                else:
+                    self.cri_gradient = None
         else:
             self.cri_pix = None
-
-        # define perceptual loss if needed
-        if train_opt.get('perceptual_opt'):
-            self.cri_perceptual = build_loss(train_opt['perceptual_opt']).to(self.device)
-        else:
             self.cri_perceptual = None
-
-        # define gradient/edge loss if needed
-        if train_opt.get('gradient_opt'):
-            self.cri_gradient = build_loss(train_opt['gradient_opt']).to(self.device)
-        else:
             self.cri_gradient = None
 
         # set up optimizers and schedulers
@@ -277,6 +283,7 @@ class DualPathModel(RAWBaseModel):
 
             l_total.backward()
             self.optimizer_g.step()
+            # torch.nn.utils.clip_grad_norm(self.net_g.parameters(), max_norm=2.5)
 
             self.log_dict = self.reduce_loss_dict(loss_dict)
 
