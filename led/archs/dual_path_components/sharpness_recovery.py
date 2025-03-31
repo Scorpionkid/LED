@@ -68,24 +68,24 @@ class SharpnessRecovery(nn.Module):
 
     def forward(self, x, noise_map=None, texture_mask=None):
 
-        if self.use_noise_map and noise_map is not None:
-            # Use simple inversion and cropping functions.
+        if self.use_texture_mask and texture_mask is not None:
+            boost_factor = torch.sigmoid(self.texture_boost)
+
+            # 使用网络增强纹理掩码的表现力
+            enhanced_texture = self.texture_enhance(texture_mask)
+
+            # - 高纹理区域(texture_mask接近1): 强锐化
+            # - 低纹理区域(texture_mask接近0): 弱锐化
+            sharp_mask = texture_mask * boost_factor * enhanced_texture
+
+            sharp_mask = torch.clamp(sharp_mask, 0.0, 1.0)
+
+        # 如果没有纹理掩码，使用噪声图或内部估计器
+        elif self.use_noise_map and noise_map is not None:
             sharp_mask = torch.clamp(1.0 - noise_map * 5.0, 0.0, 1.0)
         else:
             noise_level = self.noise_estimator(x)
             sharp_mask = 1.0 - noise_level
-
-        if self.use_texture_mask and texture_mask is not None:
-            if texture_mask.shape[2:] != x.shape[2:]:
-                raise ValueError(f"Texture mask shape {texture_mask.shape} does not match input shape {x.shape}")
-
-            # 增强纹理区域的锐化强度
-            texture_effect = self.texture_enhance(texture_mask)
-
-            # 应用纹理增强（控制在合理范围内）
-            boost_factor = torch.sigmoid(self.texture_boost)
-            texture_boosted = sharp_mask + boost_factor * texture_effect * texture_mask
-            sharp_mask = torch.clamp(texture_boosted, 0.0, 1.0)
 
         # Generate sharpness mask
         # sharpen in low noise regions, keep in high noise regions

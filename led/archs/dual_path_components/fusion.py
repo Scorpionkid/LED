@@ -3,12 +3,13 @@ import torch.nn as nn
 
 class DynamicFusion(nn.Module):
     # Dynamic fusion layer, adaptively adjust fusion weights based on content complexity
-    def __init__(self, channels, use_noise_map=False, use_texture_mask=True, fusion_texture_boost=0.5):
+    def __init__(self, channels, use_noise_map=False, use_texture_mask=False, fusion_texture_boost=0.5
+                 , fusion_smooth_boost=0.3
+                 ):
         super(DynamicFusion, self).__init__()
         self.use_noise_map = use_noise_map
         self.use_texture_mask = use_texture_mask
 
-        # 内容复杂度估计器 - 从特征中学习
         self.complexity_est = nn.Sequential(
             nn.Conv2d(channels, channels//2, 3, padding=1),
             nn.LeakyReLU(0.2, inplace=True),
@@ -18,7 +19,9 @@ class DynamicFusion(nn.Module):
             nn.Sigmoid()
         )
 
-        self.texture_boost_factor = nn.Parameter(torch.tensor(fusion_texture_boost))
+        if use_texture_mask:
+            self.texture_boost_factor = nn.Parameter(torch.tensor(fusion_texture_boost))
+            self.smooth_boost_factor = nn.Parameter(torch.tensor(fusion_smooth_boost))
 
         # 确保参数在合理范围
         self.register_buffer('min_factor', torch.tensor(0.0))
@@ -34,35 +37,20 @@ class DynamicFusion(nn.Module):
             noise_map (Tensor, optional):
         """
         # Estimate local complexity as fusion weight
-        alpha = self.complexity_est(features)
-
-        # TODO:结合噪声图进卷积or直接修正权重？
-        if self.use_noise_map and noise_map is not None:
-
-            # scheme1:
-            # Regions with high noise should tend towards the denoising path,
-            # while regions with rich details but low noise should tend towards the detail path.
-            # input_features = torch.cat([features, noise_map], dim=1)
-            # alpha = self.complexity_est(input_features)
-            # # Reduce alpha (the weight of the detail path) in regions with high noise.
-            # alpha = alpha * (1.0 - torch.sigmoid(noise_map * 3.0))
-
-            # scheme2:
-            noise_modifier = torch.exp(-5.0 * noise_map)
-            alpha = alpha * noise_modifier
+        base_alpha = self.complexity_est(features)
 
         if self.use_texture_mask and texture_mask is not None:
-            if texture_mask.shape[2:] != features.shape[2:]:
-                raise ValueError(f"Texture mask shape {texture_mask.shape} does not match features shape {features.shape}")
 
-            boost_factor = torch.clamp(self.texture_boost_factor, self.min_factor, self.max_factor)
+            texture_alpha = torch.clamp(base_alpha + self.texture_boost_factor, self.min_factor, self.max_factor)  # 高纹理区域想要的alpha
+            smooth_alpha = torch.clamp(base_alpha - self.smooth_boost_factor, self.min_factor, self.max_factor)    # 低纹理区域想要的alpha
 
-            # 应用纹理导向增强:
-            # - 高纹理区域 (texture_mask ≈ 1): 增加细节路径权重
-            # - 低纹理区域 (texture_mask ≈ 0): 保持原有权重
-            texture_boost = boost_factor * texture_mask
+            alpha = texture_mask * texture_alpha + (1.0 - texture_mask) * smooth_alpha
 
-            alpha = torch.clamp(alpha + texture_boost, 0.0, 1.0)
+        elif self.use_noise_map and noise_map is not None:
+            noise_modifier = torch.exp(-5.0 * noise_map)
+            alpha = base_alpha * noise_modifier
+
+        else: alpha = base_alpha
 
 
         return alpha * detail_path + (1.0 - alpha) * denoise_path

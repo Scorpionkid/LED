@@ -82,26 +82,18 @@ class HighFrequencyAttention(nn.Module):
         # base attention
         attention = self.attention(torch.cat([x, edge_feat], dim=1))
 
-        # Directly use the noise map to correct the attention.
         # Regions with high noise should reduce edge sensitivity.
-        if self.use_noise_map and noise_map is not None:
-            # The larger the value of the noise map, the smaller the attention weight.
-            noise_weight = torch.exp(-5.0 * noise_map)  # Exponential decay function
-            attention = attention * noise_weight
-
-        # 新增：纹理感知增强
+        # 优先使用纹理掩码(已包含噪声信息)
         if self.use_texture_mask and texture_mask is not None:
-            if texture_mask.shape[2:] != x.shape[2:]:
-                raise ValueError(f"Texture mask shape {texture_mask.shape} does not match input shape {x.shape}")
-
-            # 根据纹理掩码增强边缘响应
+            # 使用纹理掩码增强边缘响应
             texture_feat = self.texture_enhance(torch.cat([x, texture_mask], dim=1))
-
-            # 使用可学习参数控制纹理增强强度
             gate = torch.sigmoid(self.texture_gate)
-
-            # 在高纹理区域增强注意力，保留更多细节
             texture_attention = attention + gate * texture_mask * texture_feat
             attention = torch.clamp(texture_attention, 0.0, 1.0)
+
+        elif self.use_noise_map and noise_map is not None:
+
+            noise_weight = torch.exp(-5.0 * noise_map)
+            attention = attention * noise_weight
 
         return x * attention + x # Residual connection

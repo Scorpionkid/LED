@@ -13,13 +13,15 @@ class RAWTextureDetector(nn.Module):
         raw_channels (int): RAW图像的通道数，默认为4 (RGGB)
     """
     def __init__(self, window_sizes=[11, 25, 49], base_lower_thresh=0.05,
-                 base_upper_thresh=0.2, adaptive_thresh=True, raw_channels=4):
+                 base_upper_thresh=0.2, adaptive_thresh=True, raw_channels=4,
+                 noise_sensitivity=3.0):
         super(RAWTextureDetector, self).__init__()
         self.window_sizes = window_sizes
         self.base_lower_thresh = base_lower_thresh
         self.base_upper_thresh = base_upper_thresh
         self.adaptive_thresh = adaptive_thresh
         self.raw_channels = raw_channels
+        self.noise_sensitivity = nn.Parameter(torch.tensor(noise_sensitivity))
 
         # RAW图像特征提取，4通道输入
         self.feature_extractor = nn.Sequential(
@@ -34,7 +36,14 @@ class RAWTextureDetector(nn.Module):
         self.channel_weights = nn.Parameter(torch.ones(raw_channels) / raw_channels)
 
         # 多尺度融合
-        self.scale_fusion = nn.Conv2d(len(window_sizes), 1, 1)
+        if len(window_sizes) > 1:
+            self.scale_fusion = nn.Sequential(
+                nn.Conv2d(len(window_sizes), 1, 1),
+                nn.ReLU()  # 确保输出非负
+            )
+            # 初始化为均匀权重
+            nn.init.constant_(self.scale_fusion[0].weight, 1.0 / len(window_sizes))
+            nn.init.zeros_(self.scale_fusion[0].bias)
 
     def forward(self, x, noise_map=None):
         """前向传播
@@ -74,33 +83,66 @@ class RAWTextureDetector(nn.Module):
 
         # 根据噪声图调整纹理掩码（如果有）
         if noise_map is not None:
-            # 在高噪声区域降低纹理检测的灵敏度
-            noise_factor = torch.exp(-3.0 * noise_map)  # 高噪声区域接近0，低噪声区域接近1
+            noise_sensitivity = torch.clamp(self.noise_sensitivity, 0.1, 5.0)
+            noise_factor = torch.exp(-noise_sensitivity * noise_map)
+
+            noise_factor = torch.clamp(noise_factor, 1e-6, 1.0)
             texture_mask = texture_mask * noise_factor
 
         return texture_mask
 
+    # def _compute_std_map(self, features, window_size):
+    #     """计算特征的局部标准差图"""
+    #     N, C, H, W = features.shape
+    #     pad = window_size // 2
+
+    #     # 填充边界
+    #     features_padded = F.pad(features, [pad] * 4, mode='reflect')
+
+    #     # 使用unfold提取局部区域
+    #     patches = F.unfold(features_padded, kernel_size=window_size)
+    #     patches = patches.view(N, C, window_size * window_size, H, W)
+
+    #     # 计算标准差
+    #     mean = torch.mean(patches, dim=2, keepdim=True)
+    #     var = torch.mean((patches - mean) ** 2, dim=2)
+    #     std = torch.sqrt(var + 1e-8)  # 添加小值防止数值不稳定
+
+    #     # 在通道维度上聚合
+    #     std = torch.mean(std, dim=1, keepdim=True)
+
+    #     return std
+
     def _compute_std_map(self, features, window_size):
-        """计算特征的局部标准差图"""
+        """内存优化的标准差计算"""
         N, C, H, W = features.shape
         pad = window_size // 2
 
-        # 填充边界
-        features_padded = F.pad(features, [pad] * 4, mode='reflect')
+        # 填充特征图
+        features_padded = F.pad(features, [pad]*4, mode='reflect')
+        result = torch.zeros(N, 1, H, W, device=features.device)
 
-        # 使用unfold提取局部区域
-        patches = F.unfold(features_padded, kernel_size=window_size)
-        patches = patches.view(N, C, window_size * window_size, H, W)
+        # 使用卷积计算局部均值
+        # 创建平均池化核
+        avg_kernel = torch.ones(1, 1, window_size, window_size,
+                            device=features.device) / (window_size**2)
 
-        # 计算标准差
-        mean = torch.mean(patches, dim=2, keepdim=True)
-        var = torch.mean((patches - mean) ** 2, dim=2)
-        std = torch.sqrt(var + 1e-8)  # 添加小值防止数值不稳定
+        for c in range(C):
+            # 分通道处理
+            curr_feat = features_padded[:, c:c+1]
 
-        # 在通道维度上聚合
-        std = torch.mean(std, dim=1, keepdim=True)
+            # 计算局部均值
+            local_mean = F.conv2d(curr_feat, avg_kernel, stride=1, padding=0, groups=1)
 
-        return std
+            # 计算平方差
+            local_mean_sq = F.conv2d(curr_feat**2, avg_kernel, stride=1, padding=0, groups=1)
+            local_var = local_mean_sq - local_mean**2
+
+            # 累加到结果
+            result += torch.sqrt(torch.clamp(local_var, min=1e-8))
+
+        # 求所有通道的平均
+        return result / C
 
     def _compute_adaptive_thresholds(self, x, std_map):
         """计算自适应阈值"""
@@ -132,6 +174,6 @@ class RAWTextureDetector(nn.Module):
         normalized_std = torch.clamp(normalized_std, 0.0, 1.0)
 
         # 使用sigmoid函数实现平滑过渡
-        texture_mask = torch.sigmoid(6.0 * normalized_std - 3.0)  # 调整斜率使过渡更加明显
+        texture_mask = torch.sigmoid(16.0 * normalized_std - 4.0)
 
         return texture_mask

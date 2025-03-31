@@ -23,18 +23,24 @@ class DualPathBlock(nn.Module):
         self.activation = nn.LeakyReLU(0.2, inplace=True)
 
         texture_params = texture_params or {}
+        texture_gate = texture_params.get('texture_gate', 0.5)
+        texture_suppress_factor = texture_params.get('texture_suppress_factor', 0.7)
+        # texture_enhance_factor = texture_params.get('texture_enhance_factor', 0.3)
+        fusion_texture_boost = texture_params.get('fusion_texture_boost', 0.5)
+        fusion_smooth_boost = texture_params.get('fusion_smooth_boost', 0.3)
 
         # detail path
         self.detail_path = nn.Sequential(
             DilatedConvChain(out_channels),
             HighFrequencyAttention(out_channels, use_noise_map, use_texture_detection,
-                                   texture_gate=texture_params.get('texture_gate', 0.5))
+                                   texture_gate=texture_gate)
         )
 
         # denoising path gate mechanism
         self.denoise_gate = AdaptiveDenoiseGate(out_channels, use_noise_map, use_texture_detection,
-                                                texture_suppress_factor=texture_params.get('texture_suppress_factor', 0.7)
-        )
+                                                texture_suppress_factor=texture_suppress_factor
+                                                # texture_enhance_factor=texture_enhance_factor
+                                                )
 
         # denoising path residual learning
         self.residual_denoiser = ResidualDenoiser(out_channels)
@@ -42,7 +48,9 @@ class DualPathBlock(nn.Module):
         # dynamic fusion layer
         if use_texture_detection:
             self.fusion = DynamicFusion(out_channels, use_noise_map, use_texture_detection,
-                                        fusion_texture_boost=texture_params.get('fusion_texture_boost', 0.5))
+                                        fusion_texture_boost=fusion_texture_boost,
+                                        fusion_smooth_boost=fusion_smooth_boost
+                                        )
         else:
             self.fusion = DynamicFusion(out_channels, use_noise_map)
 
@@ -167,8 +175,10 @@ class DualPathUNet(nn.Module):
             self.texture_params = {
                 'texture_gate': 0.5,
                 'texture_suppress_factor': 0.7,
+                # 'texture_enhance_factor': 0.3,  # 新增
                 'fusion_texture_boost': 0.5,
-                'sharpness_texture_boost': 0.3
+                'fusion_smooth_boost': 0.3,     # 新增
+                'sharpness_texture_boost': 0.3,
             }
             if texture_params is not None:
                 self.texture_params.update(texture_params)
@@ -180,13 +190,15 @@ class DualPathUNet(nn.Module):
             base_lower_thresh = texture_detector_params.get('base_lower_thresh', 0.05)
             base_upper_thresh = texture_detector_params.get('base_upper_thresh', 0.2)
             adaptive_thresh = texture_detector_params.get('adaptive_thresh', True)
+            noise_sensitivity = texture_detector_params.get('noise_sensitivity', 3.0)  # 新增
 
             self.texture_detector = RAWTextureDetector(
                 window_sizes=window_sizes,
                 base_lower_thresh=base_lower_thresh,
                 base_upper_thresh=base_upper_thresh,
                 adaptive_thresh=adaptive_thresh,
-                raw_channels=in_channels
+                raw_channels=in_channels,
+                noise_sensitivity=noise_sensitivity
             )
 
         # encoder
@@ -236,7 +248,6 @@ class DualPathUNet(nn.Module):
             if texture_mask is None:
                 texture_mask = computed_texture_mask
 
-            texture_mask = self.texture_detector(x, noise_map)
             nmp.detect_nan(texture_mask, "纹理掩码")
 
             texture_masks = nmp.create_multiscale_maps(

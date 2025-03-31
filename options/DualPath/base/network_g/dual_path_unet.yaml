@@ -10,12 +10,26 @@ network_g:
   use_texture_detection: false
 
   texture_params:
-    texture_gate: 0.5           # HighFrequencyAttention中的纹理门控因子
-    texture_suppress_factor: 0.7 # AdaptiveDenoiseGate中的纹理抑制因子
-    fusion_texture_boost: 0.5    # DynamicFusion中的纹理增强因子
-    sharpness_texture_boost: 0.3  # SharpnessRecovery中的纹理增强因子
+    # 高频注意力相关参数
+    texture_gate: 0.5           # 纹理门控因子
+
+    # 自适应去噪门控参数
+    texture_suppress_factor: 0.7 # 纹理区域降噪抑制因子
+    # texture_enhance_factor: 0.15  # 新增: 平滑区域降噪增强因子
+
+    # 动态融合参数
+    fusion_texture_boost: 0.5    # 纹理区域细节增强因子
+    fusion_smooth_boost: 0.1     # 新增: 平滑区域去噪增强因子
+
+    # 锐度恢复参数
+    sharpness_texture_boost: 0.3  # 纹理区域锐化增强因子
+
+    # 纹理检测器参数
     texture_detector_params:
       window_sizes: [5, 9, 17]
-      base_lower_thresh: 0.05
-      base_upper_thresh: 0.2
+      # base_lower_thresh: 0.01
+      # base_upper_thresh: 0.1
+      base_lower_thresh: 0.008
+      base_upper_thresh: 0.05
       adaptive_thresh: true
+      noise_sensitivity: 3.0        # 新增: 纹理检测对噪声的敏感度
