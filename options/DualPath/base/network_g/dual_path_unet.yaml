@@ -8,6 +8,10 @@ network_g:
   use_sharpness_recovery: true
   use_noise_map: false
   use_texture_detection: false
+  use_texture_in_detail: false   # 只在细节路径启用
+  use_texture_in_denoise: false # 去噪路径不启用
+  use_texture_in_fusion: true   # 在融合模块启用
+  use_texture_in_recovery: true # 在锐度恢复中不启用
 
   texture_params:
     # 高频注意力相关参数
