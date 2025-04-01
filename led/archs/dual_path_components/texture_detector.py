@@ -81,13 +81,15 @@ class RAWTextureDetector(nn.Module):
         # 生成纹理掩码
         texture_mask = self._generate_texture_mask(fused_std_map, lower_thresh, upper_thresh)
 
-        # 根据噪声图调整纹理掩码（如果有）
-        if noise_map is not None:
-            noise_sensitivity = torch.clamp(self.noise_sensitivity, 0.1, 5.0)
-            noise_factor = torch.exp(-noise_sensitivity * noise_map)
+        # # 根据噪声图调整纹理掩码（如果有）
+        # if noise_map is not None:
+        #     if noise_map.size(1) > 1:
+        #         noise_map = torch.mean(noise_map, dim=1, keepdim=True)
+        #     noise_sensitivity = torch.clamp(self.noise_sensitivity, 0.1, 5.0)
+        #     noise_factor = torch.exp(-noise_sensitivity * noise_map)
 
-            noise_factor = torch.clamp(noise_factor, 1e-6, 1.0)
-            texture_mask = texture_mask * noise_factor
+        #     noise_factor = torch.clamp(noise_factor, 1e-6, 1.0)
+        #     texture_mask = texture_mask * noise_factor
 
         return texture_mask
 
@@ -114,38 +116,40 @@ class RAWTextureDetector(nn.Module):
     #     return std
 
     def _compute_std_map(self, features, window_size):
-        """内存优化的标准差计算"""
         N, C, H, W = features.shape
         pad = window_size // 2
 
-        # 填充特征图
         features_padded = F.pad(features, [pad]*4, mode='reflect')
-        result = torch.zeros(N, 1, H, W, device=features.device)
 
-        # 使用卷积计算局部均值
-        # 创建平均池化核
         avg_kernel = torch.ones(1, 1, window_size, window_size,
                             device=features.device) / (window_size**2)
 
+        result = torch.zeros(N, 1, H, W, device=features.device, dtype=torch.float32)
+
+        if C == 4:  # 原始RGGB输入
+            channel_weights = torch.tensor([1.0, 1.5, 1.0, 1.5], device=features.device)
+        else:  # 特征提取后的输入
+            channel_weights = torch.ones(C, device=features.device)
+
+        channel_weights = F.softmax(channel_weights, dim=0)
+
         for c in range(C):
-            # 分通道处理
             curr_feat = features_padded[:, c:c+1]
 
-            # 计算局部均值
             local_mean = F.conv2d(curr_feat, avg_kernel, stride=1, padding=0, groups=1)
 
-            # 计算平方差
             local_mean_sq = F.conv2d(curr_feat**2, avg_kernel, stride=1, padding=0, groups=1)
-            local_var = local_mean_sq - local_mean**2
+            local_var = torch.clamp(local_mean_sq - local_mean**2, min=1e-6)
 
-            # 累加到结果
-            result += torch.sqrt(torch.clamp(local_var, min=1e-8))
+            result += channel_weights[c] * torch.sqrt(local_var)
 
-        # 求所有通道的平均
-        return result / C
+        result = torch.pow(result, 0.8)
+
+        return result
 
     def _compute_adaptive_thresholds(self, x, std_map):
         """计算自适应阈值"""
+
         # 基于全局标准差
         global_std = torch.std(x, dim=(2, 3), keepdim=True)
         # 将全局标准差映射到合理的阈值范围
@@ -168,12 +172,62 @@ class RAWTextureDetector(nn.Module):
         return lower_thresh, upper_thresh
 
     def _generate_texture_mask(self, std_map, lower_thresh, upper_thresh):
-        """生成平滑过渡的纹理掩码"""
-        # 标准化标准差
-        normalized_std = (std_map - lower_thresh) / (upper_thresh - lower_thresh)
+        """Generate texture mask using quantiles and segmented sigmoid
+
+        Args:
+            std_map: Standard deviation map [1, 1, H, W]
+            lower_thresh: Lower threshold [1, 4, 1, 1]
+            upper_thresh: Upper threshold [1, 4, 1, 1]
+
+        Returns:
+            Texture mask [1, 1, H, W]
+        """
+        # Compute quantiles for the standard deviation map
+        std_flat = std_map.view(-1)
+        q_low = torch.quantile(std_flat, 0.3)  # 30% quantile
+        q_high = torch.quantile(std_flat, 0.7)  # 70% quantile
+
+        # Since lower_thresh and upper_thresh are [1, 4, 1, 1] but std_map is [1, 1, H, W],
+        # we need to convert the thresholds to match std_map's shape
+        # Take average across channel dimension (dim=1)
+        lower_mean = torch.mean(lower_thresh, dim=1, keepdim=True)  # [1, 1, 1, 1]
+        upper_mean = torch.mean(upper_thresh, dim=1, keepdim=True)  # [1, 1, 1, 1]
+
+        # Combine original thresholds with quantiles
+        l_thresh = (lower_mean + q_low) / 2
+        u_thresh = (upper_mean + q_high) / 2
+
+        # Ensure minimum difference - safely with tensors
+        thresh_diff = u_thresh - l_thresh
+        if thresh_diff.item() < 0.01:
+            u_thresh = l_thresh + 0.01
+
+        # Normalize standard deviation map
+        normalized_std = (std_map - l_thresh) / (u_thresh - l_thresh)
         normalized_std = torch.clamp(normalized_std, 0.0, 1.0)
 
-        # 使用sigmoid函数实现平滑过渡
-        texture_mask = torch.sigmoid(16.0 * normalized_std - 4.0)
+        # Apply segmented sigmoid function
+        mask = self._apply_segmented_sigmoid(normalized_std)
 
-        return texture_mask
+        return mask
+
+    def _apply_segmented_sigmoid(self, norm_std):
+        """Apply segmented sigmoid function for better mask distribution"""
+        mask = torch.zeros_like(norm_std)
+
+        # Define regions based on normalized standard deviation
+        low_region = norm_std < 0.25
+        mid_region = (norm_std >= 0.25) & (norm_std <= 0.6)
+        high_region = norm_std > 0.6
+
+        # Apply different sigmoid mappings to each region
+        # For low regions (smoother curve to better differentiate subtle textures)
+        mask[low_region] = torch.sigmoid(10.0 * norm_std[low_region] - 1.5) * 0.4
+
+        # For mid regions (steeper curve for better contrast)
+        mask[mid_region] = torch.sigmoid(20.0 * norm_std[mid_region] - 8.0) * 0.5 + 0.25
+
+        # For high regions (ensure strong textures are clearly identified)
+        mask[high_region] = torch.sigmoid(8.0 * norm_std[high_region] - 1.0) * 0.3 + 0.7
+
+        return mask

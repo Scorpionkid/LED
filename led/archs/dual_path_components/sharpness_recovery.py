@@ -69,16 +69,25 @@ class SharpnessRecovery(nn.Module):
     def forward(self, x, noise_map=None, texture_mask=None):
 
         if self.use_texture_mask and texture_mask is not None:
-            boost_factor = torch.sigmoid(self.texture_boost)
+            boost_factor = torch.clamp(self.texture_boost, 0.3, 1.0)
 
             # 使用网络增强纹理掩码的表现力
             enhanced_texture = self.texture_enhance(texture_mask)
 
-            # - 高纹理区域(texture_mask接近1): 强锐化
-            # - 低纹理区域(texture_mask接近0): 弱锐化
-            sharp_mask = texture_mask * boost_factor * enhanced_texture
+            if self.use_noise_map and noise_map is not None:
+                # 噪声调制因子：0.3到1.0范围，不会完全消除锐化
+                noise_factor = 0.3 + 0.7 * torch.exp(-4.0 * noise_map)
 
-            sharp_mask = torch.clamp(sharp_mask, 0.0, 1.0)
+                # 1. 首先基于纹理和增强确定基础锐化强度
+                base_sharpness = (texture_mask + enhanced_texture) / 2.0
+
+                # 2. 应用boost_factor作为系数
+                boosted_sharpness = base_sharpness * boost_factor
+
+                # 3. 基于噪声调制，但保持合理范围
+                sharp_mask = boosted_sharpness * noise_factor
+
+            sharp_mask = torch.clamp(sharp_mask, 0.05, 0.95)
 
         # 如果没有纹理掩码，使用噪声图或内部估计器
         elif self.use_noise_map and noise_map is not None:
