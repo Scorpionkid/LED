@@ -71,7 +71,6 @@ class SharpnessRecovery(nn.Module):
         if self.use_texture_mask and texture_mask is not None:
             boost_factor = torch.clamp(self.texture_boost, 0.3, 1.0)
 
-            # 使用网络增强纹理掩码的表现力
             enhanced_texture = self.texture_enhance(texture_mask)
 
             if self.use_noise_map and noise_map is not None:
