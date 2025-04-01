@@ -58,33 +58,24 @@ class SharpnessRecovery(nn.Module):
         self.adaptive_sharp = AdaptiveUnsharpMask(in_channels)
 
         if use_texture_mask:
-            self.texture_enhance = nn.Sequential(
-                nn.Conv2d(1, 8, 3, padding=1),
-                nn.LeakyReLU(0.2, inplace=True),
-                nn.Conv2d(8, 1, 3, padding=1),
-                nn.Sigmoid()
-            )
+            # self.texture_enhance = nn.Sequential(
+            #     nn.Conv2d(1, 8, 3, padding=1),
+            #     nn.LeakyReLU(0.2, inplace=True),
+            #     nn.Conv2d(8, 1, 3, padding=1),
+            #     nn.Sigmoid()
+            # )
             self.texture_boost = nn.Parameter(torch.tensor(sharpness_texture_boost))
 
     def forward(self, x, noise_map=None, texture_mask=None):
 
         if self.use_texture_mask and texture_mask is not None:
-            boost_factor = torch.clamp(self.texture_boost, 0.3, 1.0)
-
-            enhanced_texture = self.texture_enhance(texture_mask)
+            boost_factor = torch.clamp(self.texture_boost, 0.2, 0.8)
 
             if self.use_noise_map and noise_map is not None:
-                # 噪声调制因子：0.3到1.0范围，不会完全消除锐化
+                # 保持原有噪声计算
                 noise_factor = 0.3 + 0.7 * torch.exp(-4.0 * noise_map)
 
-                # 1. 首先基于纹理和增强确定基础锐化强度
-                base_sharpness = (texture_mask + enhanced_texture) / 2.0
-
-                # 2. 应用boost_factor作为系数
-                boosted_sharpness = base_sharpness * boost_factor
-
-                # 3. 基于噪声调制，但保持合理范围
-                sharp_mask = boosted_sharpness * noise_factor
+                sharp_mask = texture_mask * boost_factor * noise_factor
 
             sharp_mask = torch.clamp(sharp_mask, 0.05, 0.95)
 

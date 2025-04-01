@@ -83,28 +83,16 @@ class HighFrequencyAttention(nn.Module):
         base_attention = self.attention(torch.cat([x, edge_feat], dim=1))
 
         # Regions with high noise should reduce edge sensitivity.
-        # 优先使用纹理掩码(已包含噪声信息)
         if self.use_texture_mask and texture_mask is not None:
-            # 使用纹理掩码增强边缘响应
             texture_feat = self.texture_enhance(torch.cat([x, texture_mask], dim=1))
-            gate = torch.clamp(self.texture_gate, 0.2, 0.8)  # 限制范围
+            gate = torch.clamp(self.texture_gate, 0.2, 0.8)
 
             if self.use_noise_map and noise_map is not None:
-                # 噪声调制因子：0.4到1.0范围，确保保留基本边缘
+                # 保持原有噪声计算
                 noise_factor = 0.4 + 0.6 * torch.exp(-4.0 * noise_map)
 
-                # 加权组合：基础注意力 + 纹理增强 * 噪声调制
-                # 纹理增强项
-                texture_enhancement = gate * texture_mask * texture_feat
-
-                # 应用噪声调制
-                texture_enhancement = texture_enhancement * noise_factor
-
-                # 基础注意力 + 纹理增强（不是相乘）
-                attention = base_attention + texture_enhancement
-            else:
-                texture_enhancement = gate * texture_mask * texture_feat
-                attention = base_attention + texture_enhancement
+                effective_texture = texture_mask * noise_factor
+                attention = base_attention * (1.0 - gate * effective_texture) + texture_feat * (gate * effective_texture)
 
         elif self.use_noise_map and noise_map is not None:
 

@@ -36,25 +36,18 @@ class AdaptiveDenoiseGate(nn.Module):
 
         # 优先处理纹理相关逻辑
         if self.use_texture_mask and texture_mask is not None:
-            suppress_factor = torch.clamp(torch.sigmoid(self.texture_suppress_factor), 0.3, 0.7)
+            texture_weight = torch.clamp(torch.sigmoid(self.texture_suppress_factor), 0.2, 0.7)
 
-            # 如果同时有噪声图，进行噪声感知的纹理处理
             if self.use_noise_map and noise_map is not None:
-                # 噪声增强因子 - 高噪声区域接近1，低噪声区域接近0
+                # 保持原有噪声计算
                 noise_enhance = torch.sigmoid(4.0 * noise_map - 1.0)
 
-                # 加权组合：计算纹理区域的抑制量
-                texture_suppress = suppress_factor * texture_mask
-
-                # 基于噪声减少抑制效果（高噪声时需要更多降噪）
-                noise_adjusted_suppress = texture_suppress * (1.0 - 0.6 * noise_enhance)
-
-                # 应用抑制：基础值 - 调整后的抑制量
-                denoise_strength = base_strength * (1.0 - noise_adjusted_suppress)
+                # 简化为单一插值
+                effective_weight = texture_weight * (1.0 - 0.6 * noise_enhance)
+                denoise_strength = base_strength * (1.0 - effective_weight * texture_mask) + 0.2 * effective_weight * texture_mask
             else:
-                # 原始思路但避免连乘
-                texture_suppress = suppress_factor * texture_mask
-                denoise_strength = base_strength * (1.0 - texture_suppress)
+                # 其余简化逻辑保持不变
+                denoise_strength = base_strength * (1.0 - texture_weight * texture_mask) + 0.2 * texture_weight * texture_mask
 
         # 噪声处理逻辑
         elif self.use_noise_map and noise_map is not None:
