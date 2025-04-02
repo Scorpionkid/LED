@@ -12,16 +12,13 @@ class RAWTextureDetector(nn.Module):
         adaptive_thresh (bool): 是否使用自适应阈值
         raw_channels (int): RAW图像的通道数，默认为4 (RGGB)
     """
-    def __init__(self, window_sizes=[11, 25, 49], base_lower_thresh=0.05,
-                 base_upper_thresh=0.2, adaptive_thresh=True, raw_channels=4,
+    def __init__(self, window_sizes=[11, 25, 49], adaptive_thresh=True, raw_channels=4,
                  noise_sensitivity=3.0):
         super(RAWTextureDetector, self).__init__()
         self.window_sizes = window_sizes
-        self.base_lower_thresh = base_lower_thresh
-        self.base_upper_thresh = base_upper_thresh
         self.adaptive_thresh = adaptive_thresh
         self.raw_channels = raw_channels
-        self.noise_sensitivity = nn.Parameter(torch.tensor(noise_sensitivity))
+        # self.noise_sensitivity = nn.Parameter(torch.tensor(noise_sensitivity))
 
         # RAW图像特征提取，4通道输入
         self.feature_extractor = nn.Sequential(
@@ -73,10 +70,7 @@ class RAWTextureDetector(nn.Module):
             fused_std_map = texture_maps[0]
 
         # 获取阈值 - 固定或自适应
-        if self.adaptive_thresh:
-            lower_thresh, upper_thresh = self._compute_adaptive_thresholds(x, fused_std_map)
-        else:
-            lower_thresh, upper_thresh = self.base_lower_thresh, self.base_upper_thresh
+        lower_thresh, upper_thresh = self._compute_adaptive_thresholds(x, fused_std_map)
 
         # 生成纹理掩码
         texture_mask = self._generate_texture_mask(fused_std_map, lower_thresh, upper_thresh)
@@ -144,27 +138,39 @@ class RAWTextureDetector(nn.Module):
             result += channel_weights[c] * torch.sqrt(local_var)
 
         result = torch.pow(result, 0.8)
+        # result = result / (torch.mean(result) + 1e-6)
 
         return result
 
     def _compute_adaptive_thresholds(self, x, std_map):
-        """计算自适应阈值"""
+        """计算完全基于图像统计量的自适应阈值"""
+
+        # 计算std_map的分位点
+        std_flat = std_map.view(-1)
+        q25 = torch.quantile(std_flat, 0.25)
+        q75 = torch.quantile(std_flat, 0.75)
+
+        # 计算四分位距(IQR)
+        iqr = q75 - q25
 
         # 基于全局标准差
         global_std = torch.std(x, dim=(2, 3), keepdim=True)
-        # 将全局标准差映射到合理的阈值范围
+
+        # 直接使用分位点计算基础阈值，而非使用预设的base_lower/upper_thresh
+        lower_thresh = (q25 - 0.5 * iqr).view(1, 1, 1, 1).expand_as(global_std)
+        upper_thresh = (q75 + 0.5 * iqr).view(1, 1, 1, 1).expand_as(global_std)
+
+        # 应用全局标准差调整
         global_factor = torch.clamp(global_std * 5.0, 0.5, 2.0)
+        lower_thresh = lower_thresh * global_factor
+        upper_thresh = upper_thresh * global_factor
 
-        # 调整基础阈值
-        lower_thresh = self.base_lower_thresh * global_factor
-        upper_thresh = self.base_upper_thresh * global_factor
-
-        # 应用在通道维度上的权重
+        # 应用在通道维度上的权重(保留原有功能)
         channel_weights = F.softmax(self.channel_weights, dim=0).view(1, self.raw_channels, 1, 1)
         weighted_x = x * channel_weights
         channel_std = torch.std(weighted_x, dim=(2, 3), keepdim=True)
 
-        # 进一步基于各通道的特性调整阈值
+        # 进一步基于各通道的特性调整阈值(保留原有功能)
         channel_factor = torch.clamp(channel_std * 2.0, 0.8, 1.2)
         lower_thresh = lower_thresh * channel_factor
         upper_thresh = upper_thresh * channel_factor
@@ -172,42 +178,45 @@ class RAWTextureDetector(nn.Module):
         return lower_thresh, upper_thresh
 
     def _generate_texture_mask(self, std_map, lower_thresh, upper_thresh):
-        """Generate texture mask using quantiles and segmented sigmoid
-
-        Args:
-            std_map: Standard deviation map [1, 1, H, W]
-            lower_thresh: Lower threshold [1, 4, 1, 1]
-            upper_thresh: Upper threshold [1, 4, 1, 1]
-
-        Returns:
-            Texture mask [1, 1, H, W]
-        """
-        # Compute quantiles for the standard deviation map
+        # 获取std_map的基本统计量
         std_flat = std_map.view(-1)
-        q_low = torch.quantile(std_flat, 0.3)  # 30% quantile
-        q_high = torch.quantile(std_flat, 0.7)  # 70% quantile
+        q30 = torch.quantile(std_flat, 0.30)
+        q70 = torch.quantile(std_flat, 0.70)
 
-        # Since lower_thresh and upper_thresh are [1, 4, 1, 1] but std_map is [1, 1, H, W],
-        # we need to convert the thresholds to match std_map's shape
-        # Take average across channel dimension (dim=1)
-        lower_mean = torch.mean(lower_thresh, dim=1, keepdim=True)  # [1, 1, 1, 1]
-        upper_mean = torch.mean(upper_thresh, dim=1, keepdim=True)  # [1, 1, 1, 1]
+        # 将传入的lower_thresh和upper_thresh转换为单一值
+        lower_mean = torch.mean(lower_thresh, dim=1, keepdim=True)  # 例如：0.0076
+        upper_mean = torch.mean(upper_thresh, dim=1, keepdim=True)  # 例如：0.0758
 
-        # Combine original thresholds with quantiles
-        l_thresh = (lower_mean + q_low) / 2
-        u_thresh = (upper_mean + q_high) / 2
+        # 结合传入阈值和实际分布情况
+        l_thresh = 0.3 * lower_mean + 0.7 * q30  # 例如：~0.0302
+        u_thresh = 0.3 * upper_mean + 0.7 * q70  # 例如：~0.0473
 
-        # Ensure minimum difference - safely with tensors
+        # 检查分布的集中程度
+        iqr = q70 - q30  # 例如：0.0070
+
+        # 如果分布过于集中，扩展阈值范围
+        if iqr < 0.01:  # 会触发此条件
+            # 扩展阈值，但仍参考原始阈值
+            l_thresh = l_thresh - 0.5 * iqr  # 例如：~0.0267
+            u_thresh = u_thresh + 0.5 * iqr  # 例如：~0.0508
+
+        # 确保最小阈值差距
         thresh_diff = u_thresh - l_thresh
-        if thresh_diff.item() < 0.01:
-            u_thresh = l_thresh + 0.01
+        if thresh_diff < 0.015:  # 增加最小差距
+            midpoint = (l_thresh + u_thresh) / 2
+            l_thresh = midpoint - 0.0075
+            u_thresh = midpoint + 0.0075
 
-        # Normalize standard deviation map
-        normalized_std = (std_map - l_thresh) / (u_thresh - l_thresh)
-        normalized_std = torch.clamp(normalized_std, 0.0, 1.0)
+        # 计算sigmoid参数
+        midpoint = (l_thresh + u_thresh) / 2  # 例如：~0.0387
+        scale = u_thresh - l_thresh  # 例如：~0.0241
 
-        # Apply segmented sigmoid function
-        mask = self._apply_segmented_sigmoid(normalized_std)
+        # 使用sigmoid进行平滑非线性映射
+        steepness = 8.0
+        normalized = torch.sigmoid(steepness * (std_map - midpoint) / scale)
+
+        # 缩放到[0.1, 0.8]范围，避免极端值
+        mask = 0.1 + 0.7 * normalized
 
         return mask
 
@@ -216,18 +225,28 @@ class RAWTextureDetector(nn.Module):
         mask = torch.zeros_like(norm_std)
 
         # Define regions based on normalized standard deviation
-        low_region = norm_std < 0.25
-        mid_region = (norm_std >= 0.25) & (norm_std <= 0.6)
-        high_region = norm_std > 0.6
+        low_region = norm_std < 0.3
+        mid_region = (norm_std >= 0.3) & (norm_std <= 0.7)
+        high_region = norm_std > 0.7
 
         # Apply different sigmoid mappings to each region
         # For low regions (smoother curve to better differentiate subtle textures)
-        mask[low_region] = torch.sigmoid(10.0 * norm_std[low_region] - 1.5) * 0.4
+        # mask[low_region] = torch.sigmoid(8 * norm_std[low_region] - 1.5) * 0.3
 
         # For mid regions (steeper curve for better contrast)
-        mask[mid_region] = torch.sigmoid(20.0 * norm_std[mid_region] - 8.0) * 0.5 + 0.25
+        # mask[mid_region] = torch.sigmoid(20.0 * norm_std[mid_region] - 8.0) * 0.5 + 0.25
 
         # For high regions (ensure strong textures are clearly identified)
-        mask[high_region] = torch.sigmoid(8.0 * norm_std[high_region] - 1.0) * 0.3 + 0.7
+        # mask[high_region] = torch.sigmoid(8.0 * norm_std[high_region] - 1.0) * 0.3 + 0.7
+
+        # 降低整体输出范围，避免掩码过饱和
+        # 低区域：最大输出从0.4降到0.3
+        mask[low_region] = torch.sigmoid(8.0 * norm_std[low_region] - 1.5) * 0.3
+
+        # 中间区域：范围从[0.25,0.75]降到[0.3,0.6]
+        mask[mid_region] = torch.sigmoid(12.0 * norm_std[mid_region] - 6.0) * 0.3 + 0.3
+
+        # 高区域：最大输出从1.0降到0.8
+        mask[high_region] = torch.sigmoid(6.0 * norm_std[high_region] - 1.5) * 0.2 + 0.6
 
         return mask

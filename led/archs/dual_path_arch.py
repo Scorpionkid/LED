@@ -30,7 +30,7 @@ class DualPathBlock(nn.Module):
         texture_suppress_factor = texture_params.get('texture_suppress_factor', 0.7)
         # texture_enhance_factor = texture_params.get('texture_enhance_factor', 0.3)
         fusion_texture_boost = texture_params.get('fusion_texture_boost', 0.5)
-        fusion_smooth_boost = texture_params.get('fusion_smooth_boost', 0.3)
+        # fusion_smooth_boost = texture_params.get('fusion_smooth_boost', 0.3)
 
         # detail path
         self.detail_path = nn.Sequential(
@@ -52,7 +52,6 @@ class DualPathBlock(nn.Module):
         if use_texture_in_fusion:
             self.fusion = DynamicFusion(out_channels, use_noise_map, use_texture_in_fusion,
                                         fusion_texture_boost=fusion_texture_boost,
-                                        fusion_smooth_boost=fusion_smooth_boost
                                         )
         else:
             self.fusion = DynamicFusion(out_channels, use_noise_map)
@@ -192,7 +191,7 @@ class DualPathUNet(nn.Module):
                 'texture_suppress_factor': 0.7,
                 # 'texture_enhance_factor': 0.3,  # 新增
                 'fusion_texture_boost': 0.5,
-                'fusion_smooth_boost': 0.3,     # 新增
+                # 'fusion_smooth_boost': 0.3,     # 新增
                 'sharpness_texture_boost': 0.3,
             }
             if texture_params is not None:
@@ -202,15 +201,11 @@ class DualPathUNet(nn.Module):
             texture_detector_params = texture_params.get('texture_detector_params', {})
 
             window_sizes = texture_detector_params.get('window_sizes', [5, 9, 17])
-            base_lower_thresh = texture_detector_params.get('base_lower_thresh', 0.05)
-            base_upper_thresh = texture_detector_params.get('base_upper_thresh', 0.2)
             adaptive_thresh = texture_detector_params.get('adaptive_thresh', True)
             noise_sensitivity = texture_detector_params.get('noise_sensitivity', 3.0)  # 新增
 
             self.texture_detector = RAWTextureDetector(
                 window_sizes=window_sizes,
-                base_lower_thresh=base_lower_thresh,
-                base_upper_thresh=base_upper_thresh,
                 adaptive_thresh=adaptive_thresh,
                 raw_channels=in_channels,
                 noise_sensitivity=noise_sensitivity

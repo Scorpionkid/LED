@@ -121,13 +121,11 @@ class DualPathModel(RAWBaseModel):
             self.net_g_ema.eval()
 
         # define losses
-        #TODO：是否要修改
         if train_opt.get('pixel_opt'):
             if self.use_texture_detection and train_opt.get('adaptive_loss', True):
                 train_opt['pixel_opt']['type'] = 'AdaptiveTextureLoss'
                 self.cri_pix = build_loss(train_opt['pixel_opt']).to(self.device)
 
-                # Disable global perception and gradient loss.
                 self.cri_perceptual = None
                 self.cri_gradient = None
 
@@ -135,7 +133,6 @@ class DualPathModel(RAWBaseModel):
                 logger.info("Using AdaptiveTextureLoss with integrated perceptual and gradient losses")
                 logger.info("Global perceptual and gradient losses are disabled to avoid duplication")
             else:
-                # When the texture adaptive loss is not used, use the standard loss configuration.
                 self.cri_pix = build_loss(train_opt['pixel_opt']).to(self.device)
 
                 if train_opt.get('perceptual_opt'):
@@ -254,6 +251,11 @@ class DualPathModel(RAWBaseModel):
 
             if self.use_texture_detection:
                 self.output, self.texture_mask = self.net_g(**inputs)
+
+                if hasattr(self, 'texture_mask') and (current_iter - 1) % 2000 == 0:
+
+                    save_dir = os.path.join(self.opt['path']['experiments_root'], 'texture_masks')
+                    self.visualize_texture_mask(self.texture_mask, current_iter, save_dir)
             else:
                 self.output, _ = self.net_g(**inputs)
 
@@ -281,9 +283,14 @@ class DualPathModel(RAWBaseModel):
                 l_total += l_grad
                 loss_dict['l_grad'] = l_grad
 
+            # gradient explosion dectection
+            self.detect_gradient_explosion(l_total, current_iter, loss_dict)
+
             l_total.backward()
+
+            # TODO：需要调整max_norm
+            # torch.nn.utils.clip_grad_norm_(self.net_g.parameters(), max_norm=1.0)
             self.optimizer_g.step()
-            # torch.nn.utils.clip_grad_norm(self.net_g.parameters(), max_norm=2.5)
 
             self.log_dict = self.reduce_loss_dict(loss_dict)
 
@@ -391,3 +398,94 @@ class DualPathModel(RAWBaseModel):
                 inputs['noise_map'] = self.generate_noise_map_from_iso(lq, self.iso)
 
         return inputs
+
+    # 在DualPathModel类中添加此方法
+    def visualize_texture_mask(self, texture_mask, iteration, save_dir):
+        """保存纹理掩码可视化结果，监控分布"""
+        import matplotlib.pyplot as plt
+        import os
+
+        if not os.path.exists(save_dir):
+            os.makedirs(save_dir)
+
+        # 保存掩码直方图
+        plt.figure(figsize=(10, 6))
+        values = texture_mask.detach().cpu().numpy().flatten()
+        plt.hist(values, bins=50, alpha=0.7)
+        plt.title(f"Texture Mask Distribution - Iter {iteration}")
+        plt.xlabel("Mask Value")
+        plt.ylabel("Frequency")
+        plt.grid(True, alpha=0.3)
+        plt.savefig(f"{save_dir}/mask_hist_{iteration}.png")
+        plt.close()
+
+        # 保存掩码图像
+        mask_vis = texture_mask[0, 0].detach().cpu().numpy()
+        plt.figure(figsize=(8, 8))
+        plt.imshow(mask_vis, cmap='jet')
+        plt.colorbar()
+        plt.title(f"Texture Mask - Iter {iteration}")
+        plt.savefig(f"{save_dir}/mask_vis_{iteration}.png")
+        plt.close()
+
+        with open(f"{save_dir}/mask_stats.txt", "a") as f:
+            f.write(f"Iter {iteration}: Mean={values.mean():.4f}, Std={values.std():.4f}, "
+                    f"Min={values.min():.4f}, Max={values.max():.4f}\n")
+
+    def detect_gradient_explosion(self, loss, current_iter, loss_dict, threshold=100.0):
+        # Check for problematic loss values
+        if torch.isnan(loss) or torch.isinf(loss) or loss > threshold:
+            logger = get_root_logger()
+            error_msg = f"[!!!WARNING!!!] Abnormal loss value detected: {loss.item()}, possible gradient explosion!"
+            logger.error(error_msg)
+
+            # Record debug information
+            logger.error(f"Current iteration: {current_iter}, Learning rate: {self.get_current_learning_rate()}")
+
+            # Check texture mask if available
+            if hasattr(self, 'texture_mask') and self.texture_mask is not None:
+                mask_mean = torch.mean(self.texture_mask).item()
+
+                mask_stats = {
+                    "mean": torch.mean(self.texture_mask).item(),
+                    "min": torch.min(self.texture_mask).item(),
+                    "max": torch.max(self.texture_mask).item(),
+                    "has_nan": torch.isnan(self.texture_mask).any().item()
+                }
+                logger.error(f"Texture mask statistics: {mask_stats}")
+
+                if mask_mean > 0.6:
+                    logger = get_root_logger()
+                    logger.warning(f"texture maks is too high: {mask_mean:.4f}")
+
+            # Check individual loss components
+            for loss_name, loss_value in loss_dict.items():
+                logger.error(f"Loss component {loss_name}: {loss_value.item()}")
+
+            # Save diagnostic information
+            debug_state = {
+                'iter': current_iter,
+                'loss': loss.item(),
+                'loss_components': {k: v.item() for k, v in loss_dict.items()},
+                'output_stats': {
+                    'mean': torch.mean(self.output).item(),
+                    'min': torch.min(self.output).item(),
+                    'max': torch.max(self.output).item(),
+                    'has_nan': torch.isnan(self.output).any().item()
+                },
+                'gt_stats': {
+                    'mean': torch.mean(self.gt).item(),
+                    'min': torch.min(self.gt).item(),
+                    'max': torch.max(self.gt).item()
+                }
+            }
+
+            # Save debug state to file
+            debug_dir = os.path.join(self.opt['path']['experiments_root'], 'debug')
+            os.makedirs(debug_dir, exist_ok=True)
+            torch.save(debug_state, os.path.join(debug_dir, f'error_state_{current_iter}.pth'))
+
+            # Raise error to stop training
+            raise RuntimeError(error_msg)
+
+        return False
