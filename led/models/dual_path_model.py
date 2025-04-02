@@ -290,13 +290,8 @@ class DualPathModel(RAWBaseModel):
 
             # TODO：需要调整max_norm
             logger = get_root_logger()
-            grad_norm = torch.nn.utils.clip_grad_norm_(self.net_g.parameters(), float('inf'))
-            if current_iter % 100 == 0:
-                logger.info(f"Gradient norm at iter {current_iter}: {grad_norm:.4f}")
 
-            if grad_norm > 15.0:
-                logger.warning(f"Extreme gradient norm detected: {grad_norm:.4f}, applying emergency clipping")
-                torch.nn.utils.clip_grad_norm_(self.net_g.parameters(), max_norm=10.0)
+            self.adaptive_gradient_clipping(self.net_g.parameters(), current_iter, logger)
 
             self.optimizer_g.step()
 
@@ -549,3 +544,35 @@ class DualPathModel(RAWBaseModel):
                 raise RuntimeError(error_msg)
 
         return False
+
+    def adaptive_gradient_clipping(parameters, current_iter, logger=None):
+        """实施自适应分层梯度裁剪"""
+        grad_norm = torch.nn.utils.clip_grad_norm_(parameters, float('inf'))
+
+        # 定义分层裁剪策略
+        if grad_norm < 10.0:
+            # 正常范围内的梯度 - 不裁剪
+            clip_norm = float('inf')
+            action = "no clipping"
+        elif grad_norm < 15.0:
+            # 轻度超标 - 温和裁剪
+            clip_norm = 10.0
+            action = "mild clipping"
+        else:
+            # 重度超标 - 强力裁剪
+            clip_norm = 8.0
+            action = "strong clipping"
+
+        # 应用裁剪
+        if clip_norm != float('inf'):
+            torch.nn.utils.clip_grad_norm_(parameters, max_norm=clip_norm)
+
+        should_log = (current_iter % 100 == 0) or (grad_norm > 15.0)
+
+        if should_log and logger is not None:
+            if grad_norm > 15.0:
+                logger.warning(f"Gradient norm at iter {current_iter}: {grad_norm:.4f}, applying {action} (max_norm={clip_norm})")
+            else:
+                logger.info(f"Gradient norm at iter {current_iter}: {grad_norm:.4f}, {action}")
+
+        return grad_norm, clip_norm
