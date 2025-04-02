@@ -178,45 +178,69 @@ class RAWTextureDetector(nn.Module):
         return lower_thresh, upper_thresh
 
     def _generate_texture_mask(self, std_map, lower_thresh, upper_thresh):
+        """改进的纹理掩码生成函数，同时利用自适应阈值和分布统计"""
         # 获取std_map的基本统计量
         std_flat = std_map.view(-1)
         q30 = torch.quantile(std_flat, 0.30)
         q70 = torch.quantile(std_flat, 0.70)
 
-        # 将传入的lower_thresh和upper_thresh转换为单一值
-        lower_mean = torch.mean(lower_thresh, dim=1, keepdim=True)  # 例如：0.0076
-        upper_mean = torch.mean(upper_thresh, dim=1, keepdim=True)  # 例如：0.0758
+        # 将传入的阈值转换为单一值
+        lower_mean = torch.mean(lower_thresh, dim=1, keepdim=True)
+        upper_mean = torch.mean(upper_thresh, dim=1, keepdim=True)
 
-        # 结合传入阈值和实际分布情况
-        l_thresh = 0.3 * lower_mean + 0.7 * q30  # 例如：~0.0302
-        u_thresh = 0.3 * upper_mean + 0.7 * q70  # 例如：~0.0473
+        # 结合传入阈值和实际分布，但调整权重平衡
+        l_thresh = 0.5 * lower_mean + 0.5 * q30  # 增加传入阈值的权重 (从0.3→0.5)
+        u_thresh = 0.5 * upper_mean + 0.5 * q70  # 增加传入阈值的权重 (从0.3→0.5)
 
         # 检查分布的集中程度
-        iqr = q70 - q30  # 例如：0.0070
+        iqr = q70 - q30
 
-        # 如果分布过于集中，扩展阈值范围
-        if iqr < 0.01:  # 会触发此条件
-            # 扩展阈值，但仍参考原始阈值
-            l_thresh = l_thresh - 0.5 * iqr  # 例如：~0.0267
-            u_thresh = u_thresh + 0.5 * iqr  # 例如：~0.0508
+        # 如果分布过于集中，更积极地扩展阈值范围
+        if iqr < 0.01:
+            # 使用更大的扩展因子，从0.5→1.0
+            l_thresh = l_thresh - 1.0 * iqr
+            u_thresh = u_thresh + 1.0 * iqr
 
-        # 确保最小阈值差距
+        # 确保最小阈值差距，增加最小间距
         thresh_diff = u_thresh - l_thresh
-        if thresh_diff < 0.015:  # 增加最小差距
+        if thresh_diff < 0.02:  # 从0.015→0.02
             midpoint = (l_thresh + u_thresh) / 2
-            l_thresh = midpoint - 0.0075
-            u_thresh = midpoint + 0.0075
+            l_thresh = midpoint - 0.01  # 从0.0075→0.01
+            u_thresh = midpoint + 0.01  # 从0.0075→0.01
 
         # 计算sigmoid参数
-        midpoint = (l_thresh + u_thresh) / 2  # 例如：~0.0387
-        scale = u_thresh - l_thresh  # 例如：~0.0241
+        midpoint = (l_thresh + u_thresh) / 2
+        scale = u_thresh - l_thresh
 
-        # 使用sigmoid进行平滑非线性映射
-        steepness = 8.0
+        # 使用更温和的sigmoid斜率
+        steepness = 4.0  # 从8.0→4.0，使曲线更平缓
         normalized = torch.sigmoid(steepness * (std_map - midpoint) / scale)
 
-        # 缩放到[0.1, 0.8]范围，避免极端值
-        mask = 0.1 + 0.7 * normalized
+        # 计算normalized的平均值，用于动态调整输出范围
+        norm_mean = torch.mean(normalized)
+
+        # 动态调整输出范围，避免掩码分布过度偏向一端
+        if norm_mean > 0.65:  # 如果大部分区域被识别为纹理
+            # 缩小范围并降低上限
+            mask = 0.1 + 0.5 * normalized  # 范围[0.1, 0.6]
+        elif norm_mean < 0.35:  # 如果几乎没有区域被识别为纹理
+            # 缩小范围并提高下限
+            mask = 0.2 + 0.5 * normalized  # 范围[0.2, 0.7]
+        else:
+            # 标准范围，但比原来窄
+            mask = 0.15 + 0.55 * normalized  # 范围[0.15, 0.7]
+
+        stats = {
+            'q30': q30.item(),
+            'q70': q70.item(),
+            'l_thresh': l_thresh.item(),
+            'u_thresh': u_thresh.item(),
+            'iqr': iqr.item(),
+            'norm_mean': norm_mean.item(),
+            'mask_mean': torch.mean(mask).item(),
+            'mask_min': torch.min(mask).item(),
+            'mask_max': torch.max(mask).item()
+        }
 
         return mask
 

@@ -252,7 +252,7 @@ class DualPathModel(RAWBaseModel):
             if self.use_texture_detection:
                 self.output, self.texture_mask = self.net_g(**inputs)
 
-                if hasattr(self, 'texture_mask') and (current_iter - 1) % 2000 == 0:
+                if hasattr(self, 'texture_mask') and (current_iter % 1000 == 0 or current_iter < 4000 and current_iter % 500 == 0):
 
                     save_dir = os.path.join(self.opt['path']['experiments_root'], 'texture_masks')
                     self.visualize_texture_mask(self.texture_mask, current_iter, save_dir)
@@ -289,7 +289,15 @@ class DualPathModel(RAWBaseModel):
             l_total.backward()
 
             # TODO：需要调整max_norm
-            # torch.nn.utils.clip_grad_norm_(self.net_g.parameters(), max_norm=1.0)
+            logger = get_root_logger()
+            grad_norm = torch.nn.utils.clip_grad_norm_(self.net_g.parameters(), float('inf'))
+            if current_iter % 100 == 0:
+                logger.info(f"Gradient norm at iter {current_iter}: {grad_norm:.4f}")
+
+            if grad_norm > 15.0:
+                logger.warning(f"Extreme gradient norm detected: {grad_norm:.4f}, applying emergency clipping")
+                torch.nn.utils.clip_grad_norm_(self.net_g.parameters(), max_norm=10.0)
+
             self.optimizer_g.step()
 
             self.log_dict = self.reduce_loss_dict(loss_dict)
@@ -404,65 +412,110 @@ class DualPathModel(RAWBaseModel):
         """保存纹理掩码可视化结果，监控分布"""
         import matplotlib.pyplot as plt
         import os
+        import numpy as np
 
         if not os.path.exists(save_dir):
             os.makedirs(save_dir)
 
-        # 保存掩码直方图
+        # 提取掩码数据并移至CPU
+        mask_data = texture_mask.detach().cpu().numpy()
+        values = mask_data.flatten()
+
+        # 1. 保存掩码直方图
         plt.figure(figsize=(10, 6))
-        values = texture_mask.detach().cpu().numpy().flatten()
-        plt.hist(values, bins=50, alpha=0.7)
+        hist, bins = np.histogram(values, bins=50)
+        plt.bar(bins[:-1], hist, width=(bins[1]-bins[0])*0.8)
         plt.title(f"Texture Mask Distribution - Iter {iteration}")
         plt.xlabel("Mask Value")
         plt.ylabel("Frequency")
         plt.grid(True, alpha=0.3)
+
+        # 添加分布统计信息到图表
+        stats_text = (f"Mean: {values.mean():.4f}\n"
+                    f"Std: {values.std():.4f}\n"
+                    f"Min: {values.min():.4f}\n"
+                    f"Max: {values.max():.4f}\n"
+                    f"25%: {np.percentile(values, 25):.4f}\n"
+                    f"50%: {np.percentile(values, 50):.4f}\n"
+                    f"75%: {np.percentile(values, 75):.4f}")
+
+        plt.figtext(0.15, 0.7, stats_text, bbox=dict(facecolor='white', alpha=0.8))
+
         plt.savefig(f"{save_dir}/mask_hist_{iteration}.png")
         plt.close()
 
-        # 保存掩码图像
-        mask_vis = texture_mask[0, 0].detach().cpu().numpy()
+        # 2. 保存掩码图像
+        mask_vis = mask_data[0, 0]
         plt.figure(figsize=(8, 8))
-        plt.imshow(mask_vis, cmap='jet')
-        plt.colorbar()
+        im = plt.imshow(mask_vis, cmap='viridis', vmin=0.1, vmax=0.7)
+        plt.colorbar(im)
         plt.title(f"Texture Mask - Iter {iteration}")
         plt.savefig(f"{save_dir}/mask_vis_{iteration}.png")
         plt.close()
 
+        # 3. 记录详细统计数据到文件
         with open(f"{save_dir}/mask_stats.txt", "a") as f:
-            f.write(f"Iter {iteration}: Mean={values.mean():.4f}, Std={values.std():.4f}, "
-                    f"Min={values.min():.4f}, Max={values.max():.4f}\n")
+            f.write(f"Iter {iteration}:\n")
+            f.write(f"  Mean: {values.mean():.4f}, Std: {values.std():.4f}\n")
+            f.write(f"  Min: {values.min():.4f}, Max: {values.max():.4f}\n")
+            f.write(f"  Percentiles: 25%={np.percentile(values, 25):.4f}, "
+                    f"50%={np.percentile(values, 50):.4f}, "
+                    f"75%={np.percentile(values, 75):.4f}\n")
+
+            # 掩码值分布表
+            bins = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+            hist, _ = np.histogram(values, bins=bins)
+            total = len(values)
+            percentages = [count/total*100 for count in hist]
+
+            f.write("  Value distribution:\n")
+            for i, (count, percentage) in enumerate(zip(hist, percentages)):
+                f.write(f"    {bins[i]:.1f}-{bins[i+1]:.1f}: {count} pixels ({percentage:.2f}%)\n")
+            f.write("\n")
+
+        # 4. 额外添加掩码分布情况到日志
+        from led.utils import get_root_logger
+        logger = get_root_logger()
+        logger.info(f"Texture mask at iter {iteration}: "
+                    f"mean={values.mean():.4f}, std={values.std():.4f}, "
+                    f"min={values.min():.4f}, max={values.max():.4f}")
 
     def detect_gradient_explosion(self, loss, current_iter, loss_dict, threshold=100.0):
-        # Check for problematic loss values
-        if torch.isnan(loss) or torch.isinf(loss) or loss > threshold:
+
+        is_critical = torch.isnan(loss) or torch.isinf(loss)
+        is_high_loss = loss > threshold
+
+        if is_critical or is_high_loss:
             logger = get_root_logger()
-            error_msg = f"[!!!WARNING!!!] Abnormal loss value detected: {loss.item()}, possible gradient explosion!"
-            logger.error(error_msg)
 
-            # Record debug information
-            logger.error(f"Current iteration: {current_iter}, Learning rate: {self.get_current_learning_rate()}")
+            if is_critical:
+                error_msg = f"[!!!CRITICAL ERROR!!!] NaN/Inf loss detected: {loss.item()}, terminating training!"
+                log_func = logger.error
+            else:
+                error_msg = f"[WARNING] High loss value detected: {loss.item()}, possible gradient instability!"
+                log_func = logger.warning
 
-            # Check texture mask if available
+            log_func(error_msg)
+            log_func(f"Current iteration: {current_iter}, Learning rate: {self.get_current_learning_rate()}")
+
+            # 检查纹理掩码
             if hasattr(self, 'texture_mask') and self.texture_mask is not None:
-                mask_mean = torch.mean(self.texture_mask).item()
-
                 mask_stats = {
                     "mean": torch.mean(self.texture_mask).item(),
                     "min": torch.min(self.texture_mask).item(),
                     "max": torch.max(self.texture_mask).item(),
                     "has_nan": torch.isnan(self.texture_mask).any().item()
                 }
-                logger.error(f"Texture mask statistics: {mask_stats}")
+                log_func(f"Texture mask statistics: {mask_stats}")
 
-                if mask_mean > 0.6:
-                    logger = get_root_logger()
-                    logger.warning(f"texture maks is too high: {mask_mean:.4f}")
+                if mask_stats["mean"] > 0.6:
+                    log_func(f"Texture mask mean is too high: {mask_stats['mean']:.4f}")
 
-            # Check individual loss components
+            # 检查各损失组件
             for loss_name, loss_value in loss_dict.items():
-                logger.error(f"Loss component {loss_name}: {loss_value.item()}")
+                log_func(f"Loss component {loss_name}: {loss_value.item()}")
 
-            # Save diagnostic information
+            # 保存诊断信息
             debug_state = {
                 'iter': current_iter,
                 'loss': loss.item(),
@@ -480,12 +533,19 @@ class DualPathModel(RAWBaseModel):
                 }
             }
 
-            # Save debug state to file
+            # 保存调试状态到文件
             debug_dir = os.path.join(self.opt['path']['experiments_root'], 'debug')
             os.makedirs(debug_dir, exist_ok=True)
-            torch.save(debug_state, os.path.join(debug_dir, f'error_state_{current_iter}.pth'))
 
-            # Raise error to stop training
-            raise RuntimeError(error_msg)
+            if is_critical:
+                file_name = f'error_state_{current_iter}.pth'
+            else:
+                file_name = f'warning_state_{current_iter}.pth'
+
+            torch.save(debug_state, os.path.join(debug_dir, file_name))
+
+            # 只在NaN/Inf时终止训练
+            if is_critical:
+                raise RuntimeError(error_msg)
 
         return False
