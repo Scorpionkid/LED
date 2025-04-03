@@ -61,80 +61,82 @@ class AdaptiveTextureLoss(nn.Module):
             self.gradient_loss = None
 
     def forward(self, pred, target, texture_mask=None, weight=None, **kwargs):
-        """前向传播
-
-        Args:
-            pred (Tensor): 预测值 [B, C, H, W]
-            target (Tensor): 目标值 [B, C, H, W]
-            texture_mask (Tensor, optional): 纹理掩码 [B, 1, H, W]，值范围[0,1]
-            weight (Tensor, optional): 额外的权重掩码
-
-        Returns:
-            loss (Tensor): 计算的损失值
-        """
-        # 如果没有提供纹理掩码，使用固定权重
+        # 如果没有纹理掩码，使用基本损失
         if texture_mask is None:
             return self.pixel_loss_fn(pred, target, weight, reduction=self.reduction)
 
-        # 确保纹理掩码与输入尺寸匹配
+        # 确保纹理掩码尺寸匹配
         if texture_mask.shape[2:] != pred.shape[2:]:
             texture_mask = F.interpolate(texture_mask, size=pred.shape[2:], mode='bilinear')
 
-        # 计算平坦区域和纹理区域的掩码
+        # 计算平坦区域掩码
         flat_mask = 1.0 - texture_mask
-        texture_mask_binary = (texture_mask > self.texture_threshold).float()
-        flat_mask_binary = 1.0 - texture_mask_binary
 
-        # 对纹理和平坦区域计算像素损失
-        flat_loss = self.pixel_loss_fn(pred, target, flat_mask * weight if weight is not None else flat_mask, reduction='sum')
-        texture_loss = self.pixel_loss_fn(pred, target, texture_mask * weight if weight is not None else texture_mask, reduction='sum')
+        # 计算区域比例（更安全的方式）
+        total_pixels = float(pred.shape[2] * pred.shape[3] * pred.shape[0])
+        texture_ratio = torch.sum(texture_mask) / total_pixels
+        flat_ratio = 1.0 - texture_ratio
 
-        # 计算归一化权重
-        flat_area = torch.sum(flat_mask) + 1e-8
-        texture_area = torch.sum(texture_mask) + 1e-8
+        # 确保比例在合理范围内
+        texture_ratio = torch.clamp(texture_ratio, 0.05, 0.95)
+        flat_ratio = torch.clamp(flat_ratio, 0.05, 0.95)
 
-        # 归一化损失
-        flat_loss = flat_loss / flat_area
-        texture_loss = texture_loss / texture_area
+        # 对纹理和平坦区域使用mean而非sum，避免归一化问题
+        flat_loss = self.pixel_loss_fn(pred, target, flat_mask, reduction='mean')
+        texture_loss = self.pixel_loss_fn(pred, target, texture_mask, reduction='mean')
 
-        # 计算最终的像素损失
+        # 初始静态权重
+        flat_weight = self.flat_weight
+        texture_weight = self.texture_weight
+
+        # 动态权重调整（更稳定的实现）
+        if self.training and self.use_dynamic_weights:
+            # 使用log-space计算比值，避免除法带来的不稳定性
+            with torch.no_grad():  # 确保不影响梯度计算
+                # 计算losses的对数比
+                if not hasattr(self, 'loss_ratio_ema'):
+                    self.loss_ratio_ema = torch.tensor(0.0, device=pred.device)
+
+                # 直接计算对数比，避免除法
+                log_ratio = torch.log(flat_loss + 1e-6) - torch.log(texture_loss + 1e-6)
+
+                # 限制单步变化幅度，避免剧烈变化
+                log_ratio = torch.clamp(log_ratio, -0.5, 0.5)
+
+                # 更新EMA
+                self.loss_ratio_ema = 0.95 * self.loss_ratio_ema + 0.05 * log_ratio
+
+                # 将对数比转换为权重调整因子
+                adjust_factor = torch.exp(self.loss_ratio_ema)
+                adjust_factor = torch.clamp(adjust_factor, 0.8, 1.25)  # 更温和的调整范围
+
+                # 应用调整
+                texture_weight = self.texture_weight * adjust_factor.item()
+                # 保持flat_weight不变，只调整texture_weight
+
+        pixel_loss = flat_weight * flat_loss + texture_weight * texture_loss
+
+        # 使用区域比例加权，而非直接归一化
         pixel_loss = self.flat_weight * flat_loss + self.texture_weight * texture_loss
 
         # 初始化总损失
         total_loss = pixel_loss
 
-        # 添加纹理区域的感知损失
-        if self.perceptual_loss is not None and self.perceptual_weight > 0 and texture_area > 1e-6:
-            # 只在有足够的纹理区域时计算感知损失
-            if torch.sum(texture_mask_binary) > 0:
-                # 使用二进制掩码，仅保留纹理区域的信息
-                pred_texture = pred * texture_mask_binary
-                target_texture = target * texture_mask_binary
+        # 仅当纹理区域足够大时添加感知和梯度损失
+        if texture_ratio > 0.1:
+            if self.perceptual_loss is not None and self.perceptual_weight > 0:
+                # 使用软掩码而非二元掩码
+                pred_texture = pred * texture_mask
+                target_texture = target * texture_mask
                 perceptual_loss = self.perceptual_loss(pred_texture, target_texture)
-                total_loss = total_loss + self.perceptual_weight * perceptual_loss
+                total_loss += self.perceptual_weight * perceptual_loss
 
-        # 添加纹理区域的梯度损失
-        if self.gradient_loss is not None and self.gradient_weight > 0 and texture_area > 1e-6:
-            # 只在有足够的纹理区域时计算梯度损失
-            if torch.sum(texture_mask_binary) > 0:
-                pred_texture = pred * texture_mask_binary
-                target_texture = target * texture_mask_binary
-                gradient_loss = self.gradient_loss(pred_texture, target_texture)
-                total_loss = total_loss + self.gradient_weight * gradient_loss
+            if self.gradient_loss is not None and self.gradient_weight > 0:
+                gradient_loss = self.gradient_loss(pred * texture_mask, target * texture_mask)
+                total_loss += self.gradient_weight * gradient_loss
 
-        # 动态调整权重（训练时根据损失自动平衡）
-        if self.training and self.use_dynamic_weights:
-            # 跟踪并更新平坦和纹理区域的权重（使用指数移动平均）
-            if not hasattr(self, 'flat_loss_ema'):
-                self.flat_loss_ema = flat_loss.detach()
-                self.texture_loss_ema = texture_loss.detach()
-            else:
-                self.flat_loss_ema = 0.9 * self.flat_loss_ema + 0.1 * flat_loss.detach()
-                self.texture_loss_ema = 0.9 * self.texture_loss_ema + 0.1 * texture_loss.detach()
-
-            # 计算动态权重
-            ratio = self.flat_loss_ema / (self.texture_loss_ema + 1e-8)
-            self.flat_weight = 1.0
-            self.texture_weight = torch.clamp(ratio, 0.5, 2.0).item()  # 限制范围，防止过度调整
+        # 检查损失值稳定性
+        if torch.isnan(total_loss) or torch.isinf(total_loss):
+            return self.pixel_loss_fn(pred, target, reduction='mean')
 
         return total_loss

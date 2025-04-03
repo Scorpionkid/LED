@@ -44,7 +44,7 @@ train:
 
   # losses
   # 自适应纹理损失开关 (仅当use_texture_detection=true时生效)
-  adaptive_loss: true
+  adaptive_loss: false
 
   # 损失函数设置
   # 当use_texture_detection=true且adaptive_loss=true时，会自动切换为AdaptiveTextureLoss
@@ -53,13 +53,13 @@ train:
     loss_weight: 1.0
     reduction: mean
     # 以下参数仅当转换为AdaptiveTextureLoss时生效
-    pixel_loss_type: l1
-    flat_weight: 1.2        # 平坦区域权重
-    texture_weight: 1.0     # 纹理区域权重
-    perceptual_weight: 0.1  # 纹理区域感知损失权重
-    gradient_weight: 0.1    # 纹理区域梯度损失权重
-    texture_threshold: 0.5  # 纹理区域阈值
-    use_dynamic_weights: true # 使用动态权重
+    # pixel_loss_type: l1
+    # flat_weight: 1.2        # 平坦区域权重
+    # texture_weight: 1.0     # 纹理区域权重
+    # perceptual_weight: 0.1  # 纹理区域感知损失权重
+    # gradient_weight: 0.1    # 纹理区域梯度损失权重
+    # texture_threshold: 0.5  # 纹理区域阈值
+    # use_dynamic_weights: true # 使用动态权重
 
   # 常规感知损失设置
   perceptual_opt:

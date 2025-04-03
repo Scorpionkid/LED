@@ -12,10 +12,13 @@ class RAWTextureDetector(nn.Module):
         adaptive_thresh (bool): 是否使用自适应阈值
         raw_channels (int): RAW图像的通道数，默认为4 (RGGB)
     """
-    def __init__(self, window_sizes=[11, 25, 49], adaptive_thresh=True, raw_channels=4,
+    def __init__(self, window_sizes=[11, 25, 49], base_lower_thresh=0.05,
+                 base_upper_thresh=0.2, adaptive_thresh=True, raw_channels=4,
                  noise_sensitivity=3.0):
         super(RAWTextureDetector, self).__init__()
         self.window_sizes = window_sizes
+        self.base_lower_thresh = base_lower_thresh
+        self.base_upper_thresh = base_upper_thresh
         self.adaptive_thresh = adaptive_thresh
         self.raw_channels = raw_channels
         # self.noise_sensitivity = nn.Parameter(torch.tensor(noise_sensitivity))
@@ -70,7 +73,10 @@ class RAWTextureDetector(nn.Module):
             fused_std_map = texture_maps[0]
 
         # 获取阈值 - 固定或自适应
-        lower_thresh, upper_thresh = self._compute_adaptive_thresholds(x, fused_std_map)
+        if self.adaptive_thresh:
+            lower_thresh, upper_thresh = self._compute_adaptive_thresholds(x, fused_std_map)
+        else:
+            lower_thresh, upper_thresh = self.base_lower_thresh, self.base_upper_thresh
 
         # 生成纹理掩码
         texture_mask = self._generate_texture_mask(fused_std_map, lower_thresh, upper_thresh)
@@ -86,28 +92,6 @@ class RAWTextureDetector(nn.Module):
         #     texture_mask = texture_mask * noise_factor
 
         return texture_mask
-
-    # def _compute_std_map(self, features, window_size):
-    #     """计算特征的局部标准差图"""
-    #     N, C, H, W = features.shape
-    #     pad = window_size // 2
-
-    #     # 填充边界
-    #     features_padded = F.pad(features, [pad] * 4, mode='reflect')
-
-    #     # 使用unfold提取局部区域
-    #     patches = F.unfold(features_padded, kernel_size=window_size)
-    #     patches = patches.view(N, C, window_size * window_size, H, W)
-
-    #     # 计算标准差
-    #     mean = torch.mean(patches, dim=2, keepdim=True)
-    #     var = torch.mean((patches - mean) ** 2, dim=2)
-    #     std = torch.sqrt(var + 1e-8)  # 添加小值防止数值不稳定
-
-    #     # 在通道维度上聚合
-    #     std = torch.mean(std, dim=1, keepdim=True)
-
-    #     return std
 
     def _compute_std_map(self, features, window_size):
         N, C, H, W = features.shape
@@ -156,7 +140,7 @@ class RAWTextureDetector(nn.Module):
         # 基于全局标准差
         global_std = torch.std(x, dim=(2, 3), keepdim=True)
 
-        # 直接使用分位点计算基础阈值，而非使用预设的base_lower/upper_thresh
+        # # 直接使用分位点计算基础阈值，而非使用预设的base_lower/upper_thresh
         lower_thresh = (q25 - 0.5 * iqr).view(1, 1, 1, 1).expand_as(global_std)
         upper_thresh = (q75 + 0.5 * iqr).view(1, 1, 1, 1).expand_as(global_std)
 
@@ -178,99 +162,12 @@ class RAWTextureDetector(nn.Module):
         return lower_thresh, upper_thresh
 
     def _generate_texture_mask(self, std_map, lower_thresh, upper_thresh):
-        """改进的纹理掩码生成函数，同时利用自适应阈值和分布统计"""
-        # 获取std_map的基本统计量
-        std_flat = std_map.view(-1)
-        q30 = torch.quantile(std_flat, 0.30)
-        q70 = torch.quantile(std_flat, 0.70)
 
-        # 将传入的阈值转换为单一值
-        lower_mean = torch.mean(lower_thresh, dim=1, keepdim=True)
-        upper_mean = torch.mean(upper_thresh, dim=1, keepdim=True)
+        normalized_std = (std_map - lower_thresh) / (upper_thresh - lower_thresh)
+        normalized_std = torch.clamp(normalized_std, 0.0, 1.0)
 
-        # 结合传入阈值和实际分布，但调整权重平衡
-        l_thresh = 0.5 * lower_mean + 0.5 * q30  # 增加传入阈值的权重 (从0.3→0.5)
-        u_thresh = 0.5 * upper_mean + 0.5 * q70  # 增加传入阈值的权重 (从0.3→0.5)
+        # 使用sigmoid函数实现平滑过渡
+        texture_mask = torch.sigmoid(6.0 * normalized_std - 3.0)  # 调整斜率使过渡更加明显
+        texture_mask = torch.mean(texture_mask, dim=1, keepdim=True)
 
-        # 检查分布的集中程度
-        iqr = q70 - q30
-
-        # 如果分布过于集中，更积极地扩展阈值范围
-        if iqr < 0.01:
-            # 使用更大的扩展因子，从0.5→1.0
-            l_thresh = l_thresh - 1.0 * iqr
-            u_thresh = u_thresh + 1.0 * iqr
-
-        # 确保最小阈值差距，增加最小间距
-        thresh_diff = u_thresh - l_thresh
-        if thresh_diff < 0.02:  # 从0.015→0.02
-            midpoint = (l_thresh + u_thresh) / 2
-            l_thresh = midpoint - 0.01  # 从0.0075→0.01
-            u_thresh = midpoint + 0.01  # 从0.0075→0.01
-
-        # 计算sigmoid参数
-        midpoint = (l_thresh + u_thresh) / 2
-        scale = u_thresh - l_thresh
-
-        # 使用更温和的sigmoid斜率
-        steepness = 4.0  # 从8.0→4.0，使曲线更平缓
-        normalized = torch.sigmoid(steepness * (std_map - midpoint) / scale)
-
-        # 计算normalized的平均值，用于动态调整输出范围
-        norm_mean = torch.mean(normalized)
-
-        # 动态调整输出范围，避免掩码分布过度偏向一端
-        if norm_mean > 0.65:  # 如果大部分区域被识别为纹理
-            # 缩小范围并降低上限
-            mask = 0.1 + 0.5 * normalized  # 范围[0.1, 0.6]
-        elif norm_mean < 0.35:  # 如果几乎没有区域被识别为纹理
-            # 缩小范围并提高下限
-            mask = 0.2 + 0.5 * normalized  # 范围[0.2, 0.7]
-        else:
-            # 标准范围，但比原来窄
-            mask = 0.15 + 0.55 * normalized  # 范围[0.15, 0.7]
-
-        stats = {
-            'q30': q30.item(),
-            'q70': q70.item(),
-            'l_thresh': l_thresh.item(),
-            'u_thresh': u_thresh.item(),
-            'iqr': iqr.item(),
-            'norm_mean': norm_mean.item(),
-            'mask_mean': torch.mean(mask).item(),
-            'mask_min': torch.min(mask).item(),
-            'mask_max': torch.max(mask).item()
-        }
-
-        return mask
-
-    def _apply_segmented_sigmoid(self, norm_std):
-        """Apply segmented sigmoid function for better mask distribution"""
-        mask = torch.zeros_like(norm_std)
-
-        # Define regions based on normalized standard deviation
-        low_region = norm_std < 0.3
-        mid_region = (norm_std >= 0.3) & (norm_std <= 0.7)
-        high_region = norm_std > 0.7
-
-        # Apply different sigmoid mappings to each region
-        # For low regions (smoother curve to better differentiate subtle textures)
-        # mask[low_region] = torch.sigmoid(8 * norm_std[low_region] - 1.5) * 0.3
-
-        # For mid regions (steeper curve for better contrast)
-        # mask[mid_region] = torch.sigmoid(20.0 * norm_std[mid_region] - 8.0) * 0.5 + 0.25
-
-        # For high regions (ensure strong textures are clearly identified)
-        # mask[high_region] = torch.sigmoid(8.0 * norm_std[high_region] - 1.0) * 0.3 + 0.7
-
-        # 降低整体输出范围，避免掩码过饱和
-        # 低区域：最大输出从0.4降到0.3
-        mask[low_region] = torch.sigmoid(8.0 * norm_std[low_region] - 1.5) * 0.3
-
-        # 中间区域：范围从[0.25,0.75]降到[0.3,0.6]
-        mask[mid_region] = torch.sigmoid(12.0 * norm_std[mid_region] - 6.0) * 0.3 + 0.3
-
-        # 高区域：最大输出从1.0降到0.8
-        mask[high_region] = torch.sigmoid(6.0 * norm_std[high_region] - 1.5) * 0.2 + 0.6
-
-        return mask
+        return texture_mask
