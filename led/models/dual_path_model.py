@@ -13,6 +13,7 @@ from led.utils.registry import MODEL_REGISTRY
 from led.losses.perceptual_loss import VGGPerceptualLoss
 from led.losses.gradient_loss import GradientLoss
 from led.losses.adaptive_texture_loss import AdaptiveTextureLoss
+from led.models.value_monitor import ValueMonitor
 
 @MODEL_REGISTRY.register()
 class DualPathModel(RAWBaseModel):
@@ -87,6 +88,7 @@ class DualPathModel(RAWBaseModel):
 
         if self.is_train:
             self.init_training_settings()
+            self.init_monitoring()
 
         # Add support for mixed precision training.
         self.use_amp = opt.get('use_amp', False)
@@ -153,6 +155,71 @@ class DualPathModel(RAWBaseModel):
         self.setup_optimizers()
         self.setup_schedulers()
 
+    def init_monitoring(self):
+        """初始化模型监控系统"""
+        self.value_monitor = ValueMonitor()
+        self.value_monitor.register_hooks(self.net_g, prefix='net_g')
+
+        # 为锐度恢复模块添加特殊钩子（重点监控）
+        if hasattr(self.net_g, 'sharpness_recovery'):
+            def detailed_sharpness_hook(module, inputs, outputs):
+                if not hasattr(self, 'monitor_iter'):
+                    self.monitor_iter = 0
+                self.monitor_iter += 1
+
+                if self.monitor_iter % 10 == 0:  # 每10次迭代记录一次，避免过多日志
+                    with torch.no_grad():
+                        # 检查输入
+                        if isinstance(inputs, tuple) and len(inputs) > 0:
+                            input_tensor = inputs[0]
+                            input_stats = {
+                                'min': torch.min(input_tensor).item(),
+                                'max': torch.max(input_tensor).item(),
+                                'mean': torch.mean(input_tensor).item(),
+                                'std': torch.std(input_tensor).item(),
+                                'has_nan': torch.isnan(input_tensor).any().item(),
+                                'has_inf': torch.isinf(input_tensor).any().item()
+                            }
+
+                        # 检查输出
+                        output_stats = {
+                            'min': torch.min(outputs).item(),
+                            'max': torch.max(outputs).item(),
+                            'mean': torch.mean(outputs).item(),
+                            'std': torch.std(outputs).item(),
+                            'has_nan': torch.isnan(outputs).any().item(),
+                            'has_inf': torch.isinf(outputs).any().item()
+                        }
+
+                        # 检查是否有异常值
+                        if (output_stats['max'] > 2.0 or output_stats['has_nan']
+                            or output_stats['has_inf'] or input_stats['has_nan']
+                            or input_stats['has_inf']):
+
+                            print(f"\n[警告] 锐度恢复模块检测到异常值 (iter {self.monitor_iter}):")
+                            print(f"输入统计: {input_stats}")
+                            print(f"输出统计: {output_stats}")
+
+                            # 保存详细信息用于后续分析
+                            os.makedirs("debug/abnormal_values", exist_ok=True)
+                            torch.save({
+                                'iter': self.monitor_iter,
+                                'input': input_tensor.detach().cpu(),
+                                'output': outputs.detach().cpu(),
+                                'input_stats': input_stats,
+                                'output_stats': output_stats,
+                                'texture_mask': inputs[2].detach().cpu() if len(inputs) > 2 else None
+                            }, f"debug/abnormal_values/sharpness_abnormal_{self.monitor_iter}.pth")
+
+            # 注册详细的锐度恢复模块钩子
+            self.sharpness_hook = self.net_g.sharpness_recovery.register_forward_hook(
+                detailed_sharpness_hook
+            )
+
+        # 创建调试目录
+        os.makedirs("debug", exist_ok=True)
+        print("模型监控系统已初始化，将监控所有模块的异常值")
+
     def build_noise_g(self, opt):
         opt = deepcopy(opt)
         noise_g_class = eval(opt.pop('type'))
@@ -192,11 +259,16 @@ class DualPathModel(RAWBaseModel):
             self.black_level = data['black_level'].to(self.device)
             self.white_level = data['white_level'].to(self.device)
 
+
     def optimize_parameters(self, current_iter):
         """Optimize model parameters."""
         #TODO
         # if current_iter % self.accumulation_steps == 0:
         #     self.optimizer_g.zero_grad()
+
+        if hasattr(self, 'value_monitor'):
+            self.value_monitor.update_iter(current_iter)
+
         self.optimizer_g.zero_grad()
 
         # print("\n==== OPTIMIZE PARAMETERS ====")
@@ -258,6 +330,22 @@ class DualPathModel(RAWBaseModel):
                     self.visualize_texture_mask(self.texture_mask, current_iter, save_dir)
             else:
                 self.output, _ = self.net_g(**inputs)
+
+            # 感知损失计算前监控pred值
+            if hasattr(self, 'cri_perceptual') and self.cri_perceptual is not None:
+                pred_stats = {
+                    'min': torch.min(self.output).item(),
+                    'max': torch.max(self.output).item(),
+                    'mean': torch.mean(self.output).item(),
+                    'std': torch.std(self.output).item(),
+                    'has_nan': torch.isnan(self.output).any().item(),
+                    'has_inf': torch.isinf(self.output).any().item()
+                }
+
+                # 记录异常情况
+                if pred_stats['max'] > 2.0 or pred_stats['has_nan'] or pred_stats['has_inf']:
+                    print(f"\n[警告] 感知损失输入异常 (iter {current_iter}):")
+                    print(f"输出统计: {pred_stats}")
 
             l_total = 0
             loss_dict = OrderedDict()
@@ -410,7 +498,7 @@ class DualPathModel(RAWBaseModel):
         import numpy as np
 
         if not os.path.exists(save_dir):
-            os.makedirs(save_dir)
+            os.makedirs(save_dir, exist_ok=True)
 
         # 提取掩码数据并移至CPU
         mask_data = texture_mask.detach().cpu().numpy()
@@ -529,15 +617,15 @@ class DualPathModel(RAWBaseModel):
             }
 
             # 保存调试状态到文件
-            debug_dir = os.path.join(self.opt['path']['experiments_root'], 'debug')
-            os.makedirs(debug_dir, exist_ok=True)
+            # debug_dir = os.path.join(self.opt['path']['experiments_root'], 'debug')
+            # os.makedirs(debug_dir, exist_ok=True)
 
-            if is_critical:
-                file_name = f'error_state_{current_iter}.pth'
-            else:
-                file_name = f'warning_state_{current_iter}.pth'
+            # if is_critical:
+            #     file_name = f'error_state_{current_iter}.pth'
+            # else:
+            #     file_name = f'warning_state_{current_iter}.pth'
 
-            torch.save(debug_state, os.path.join(debug_dir, file_name))
+            # torch.save(debug_state, os.path.join(debug_dir, file_name))
 
             # 只在NaN/Inf时终止训练
             if is_critical:
@@ -545,7 +633,7 @@ class DualPathModel(RAWBaseModel):
 
         return False
 
-    def adaptive_gradient_clipping(parameters, current_iter, logger=None):
+    def adaptive_gradient_clipping(self, parameters, current_iter, logger=None):
         """实施自适应分层梯度裁剪"""
         grad_norm = torch.nn.utils.clip_grad_norm_(parameters, float('inf'))
 

@@ -1,16 +1,40 @@
 import torch
+import os
 
 
 class ValueMonitor:
-    def __init__(self):
+    def __init__(self, auto_save=True, save_freq=2000, save_dir="debug", threshold=5.0):
+        super().__init__()
+        self.auto_save = auto_save
+        self.save_freq = save_freq
+        self.save_dir = save_dir
+        self.last_abnormal_count = 0
         self.hooks = []
+        self.threshold = threshold
         self.abnormal_modules = {}
-        self.threshold = 5.0  # 设定异常值阈值
-        self.current_iter = 0  # 作为类的属性存储
+        self.current_iter = 0
+
+        # 确保保存目录存在
+        if self.auto_save:
+            os.makedirs(self.save_dir, exist_ok=True)
 
     def update_iter(self, iter_num):
-        """更新当前迭代计数"""
+        """更新迭代计数并自动保存"""
         self.current_iter = iter_num
+
+        # 自动保存逻辑
+        if self.auto_save:
+            # 定期保存
+            if iter_num % self.save_freq == 0:
+                self.save_report(f"{self.save_dir}/report_{iter_num}.txt")
+
+                # # 如果检测到新的异常值，立即保存
+                # total_abnormal = sum(len(data['inputs']) + len(data['outputs'])
+                #                 for data in self.abnormal_modules.values())
+
+                # if total_abnormal > self.last_abnormal_count:
+                #     self.save_report(f"{self.save_dir}/abnormal_{iter_num}.txt")
+                #     self.last_abnormal_count = total_abnormal
 
     def register_hooks(self, model, prefix=''):
         """为模型的所有模块注册钩子"""
@@ -37,7 +61,7 @@ class ValueMonitor:
             input_tensor = inputs[0]
             if isinstance(input_tensor, torch.Tensor):
                 max_val = torch.max(torch.abs(input_tensor)).item()
-                if max_val > self.threshold:
+                if max_val > self.threshold and self.current_iter % self.save_freq == 0:
                     print(f"异常输入检测 - 迭代: {self.current_iter}, 模块: {name}, 最大绝对值: {max_val:.4f}")
                     if name not in self.abnormal_modules:
                         self.abnormal_modules[name] = {'inputs': [], 'outputs': []}
@@ -46,7 +70,7 @@ class ValueMonitor:
         # 检查输出
         if isinstance(outputs, torch.Tensor):
             max_val = torch.max(torch.abs(outputs)).item()
-            if max_val > self.threshold:
+            if max_val > self.threshold and self.current_iter % self.save_freq == 0:
                 print(f"异常输出检测 - 迭代: {self.current_iter}, 模块: {name}, 最大绝对值: {max_val:.4f}")
                 if name not in self.abnormal_modules:
                     self.abnormal_modules[name] = {'inputs': [], 'outputs': []}
@@ -59,19 +83,24 @@ class ValueMonitor:
         self.hooks = []
 
     def save_report(self, path="debug/module_report.txt"):
-        """保存当前的监控报告"""
-        with open(path, "w") as f:
-            f.write(f"异常值监控报告 (当前迭代: {self.current_iter})\n")
-            f.write("="*50 + "\n\n")
 
-            for module_name, data in self.abnormal_modules.items():
-                f.write(f"模块: {module_name}\n")
-                if data['inputs']:
-                    f.write("  异常输入:\n")
-                    for iter_num, value in data['inputs']:
-                        f.write(f"    迭代 {iter_num}: {value:.4f}\n")
-                if data['outputs']:
-                    f.write("  异常输出:\n")
-                    for iter_num, value in data['outputs']:
-                        f.write(f"    迭代 {iter_num}: {value:.4f}\n")
-                f.write("\n")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        try:
+            """保存当前的监控报告"""
+            with open(path, "w") as f:
+                f.write(f"异常值监控报告 (当前迭代: {self.current_iter})\n")
+                f.write("="*50 + "\n\n")
+
+                for module_name, data in self.abnormal_modules.items():
+                    f.write(f"模块: {module_name}\n")
+                    if data['inputs']:
+                        f.write("  异常输入:\n")
+                        for iter_num, value in data['inputs']:
+                            f.write(f"    迭代 {iter_num}: {value:.4f}\n")
+                    if data['outputs']:
+                        f.write("  异常输出:\n")
+                        for iter_num, value in data['outputs']:
+                            f.write(f"    迭代 {iter_num}: {value:.4f}\n")
+                    f.write("\n")
+        except Exception as e:
+            print(f"保存报告失败: {str(e)}")
