@@ -50,22 +50,27 @@ class DilatedConvChain(nn.Module):
             res = self.activation(conv(res) + res)  # Residual connection
         return res
 
-class HighFrequencyAttention(nn.Module):
-    # High-frequency attention module, focusing on edge and texture information in the image
+class DetailPath(nn.Module):
+
     def __init__(self, channels, use_noise_map=False, use_texture_mask=False, texture_gate=0.5):
-        super(HighFrequencyAttention, self).__init__()
-        self.edge_detector = SobelFilter()
-        self.conv_edge = nn.Conv2d(channels, channels, 3, padding=1)
+        super(DetailPath, self).__init__()
         self.use_noise_map = use_noise_map
         self.use_texture_mask = use_texture_mask
 
-        # self.noise_conv = nn.Conv2d(4, channels, 1)
+        # 膨胀卷积链
+        self.dilated_convs = DilatedConvChain(channels)
 
+        # 边缘检测
+        self.edge_detector = SobelFilter()
+        self.edge_conv = nn.Conv2d(channels, channels, 3, padding=1)
+
+        # 注意力生成
         self.attention = nn.Sequential(
             nn.Conv2d(channels * 2, channels, 3, padding=1),
             nn.Sigmoid()
         )
 
+        # 纹理处理
         if use_texture_mask:
             self.texture_enhance = nn.Sequential(
                 nn.Conv2d(channels + 1, channels, 1),
@@ -75,16 +80,29 @@ class HighFrequencyAttention(nn.Module):
             self.texture_gate = nn.Parameter(torch.tensor(texture_gate))
 
     def forward(self, x, noise_map=None, texture_mask=None):
-        # Edge detection
+        """前向传播
+
+        Args:
+            x: 输入特征 [B, C, H, W]
+            noise_map: 可选的噪声图 [B, 1, H, W]
+            texture_mask: 可选的纹理掩码 [B, 1, H, W]
+
+        Returns:
+            增强的特征 [B, C, H, W]
+        """
+        # 膨胀卷积链处理
+        feat = self.dilated_convs(x)
+
+        # 边缘检测
         edge_map = self.edge_detector(x)
-        edge_feat = self.conv_edge(edge_map)
+        edge_feat = self.edge_conv(edge_map)
 
-        # base attention
-        base_attention = self.attention(torch.cat([x, edge_feat], dim=1))
+        # 基本注意力
+        base_attention = self.attention(torch.cat([feat, edge_feat], dim=1))
 
-        # Regions with high noise should reduce edge sensitivity.
+        # 纹理处理
         if self.use_texture_mask and texture_mask is not None:
-            texture_feat = self.texture_enhance(torch.cat([x, texture_mask], dim=1))
+            texture_feat = self.texture_enhance(torch.cat([feat, texture_mask], dim=1))
             gate = torch.clamp(self.texture_gate, 0.2, 0.8)
 
             if self.use_noise_map and noise_map is not None:
@@ -93,16 +111,19 @@ class HighFrequencyAttention(nn.Module):
 
                 effective_texture = texture_mask * noise_factor
                 attention = base_attention * (1.0 - gate * effective_texture) + texture_feat * (gate * effective_texture)
+            else:
+                attention = base_attention
 
+        # 噪声处理
         elif self.use_noise_map and noise_map is not None:
-
             noise_weight = torch.exp(-5.0 * noise_map)
-
-            # 方案二：修改为加权调整，不会过度减弱注意力
             # noise_weight = 0.6 + 0.4 * torch.exp(-5.0 * noise_map)
+            attention = base_attention * noise_weight
+        else:
+            attention = base_attention
 
-            attention = attention * noise_weight
-
+        # 限制注意力范围
         attention = torch.clamp(attention, 0.1, 1.0)
 
-        return x * attention + x # Residual connection
+        # 应用注意力
+        return x * attention + x# Residual connection

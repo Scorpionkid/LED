@@ -5,8 +5,7 @@ from led.utils.registry import ARCH_REGISTRY
 import led.utils.noise_map_processor as nmp
 
 from .dual_path_components import (
-    DilatedConvChain, HighFrequencyAttention,
-    AdaptiveDenoiseGate, ResidualDenoiser,
+    DenoisePath, DetailPath,
     DynamicFusion,
     WaveletUpsample, SharpnessRecovery, DiscreteWaveletUpsample,
     RAWTextureDetector
@@ -32,20 +31,11 @@ class DualPathBlock(nn.Module):
         fusion_texture_boost = texture_params.get('fusion_texture_boost', 0.5)
 
         # detail path
-        self.detail_path = nn.Sequential(
-            DilatedConvChain(out_channels),
-            HighFrequencyAttention(out_channels, use_noise_map, use_texture_in_detail,
-                                   texture_gate=texture_gate)
-        )
+        self.detail_path = DenoisePath(out_channels, use_noise_map, use_texture_in_detail, texture_gate)
 
         # denoising path gate mechanism
-        self.denoise_gate = AdaptiveDenoiseGate(out_channels, use_noise_map, use_texture_in_denoise,
-                                                texture_suppress_factor=texture_suppress_factor
-                                                # texture_enhance_factor=texture_enhance_factor
-                                                )
+        self.denoise_gate = DetailPath(out_channels, use_noise_map, use_texture_in_denoise, texture_suppress_factor)
 
-        # denoising path residual learning
-        self.residual_denoiser = ResidualDenoiser(out_channels)
 
         # dynamic fusion layer
         if use_texture_in_fusion:
@@ -82,20 +72,18 @@ class DualPathBlock(nn.Module):
         #----------------------------- DETAIL PATH -----------------------------#
 
         if self.use_texture_in_detail and texture_mask is not None:
-            detail = self.detail_path[0](feat)
             if self.use_noise_map and noise_map is not None:
                 detail = nmp.apply_to_module(
-                    detail, self.detail_path[-1], noise_map, texture_mask, detail.size(1)
+                    feat, self.detail_path, noise_map, texture_mask, detail.size(1)
                 )
             else:
                 detail = nmp.apply_to_module(
-                    detail, self.detail_path[-1], texture_mask=texture_mask, target_channels=detail.size(1)
+                    feat, self.detail_path, texture_mask=texture_mask, target_channels=detail.size(1)
                 )
         else:
             if self.use_noise_map and noise_map is not None:
-                detail = self.detail_path[0](feat)
                 detail = nmp.apply_to_module(
-                    detail, self.detail_path[-1], noise_map=noise_map, target_channels=detail.size(1)
+                    feat, self.detail_path, noise_map=noise_map, target_channels=detail.size(1)
                 )
             else:
                 detail = self.detail_path(feat)
@@ -106,25 +94,23 @@ class DualPathBlock(nn.Module):
         # Compute adaptive gating mechanism
         if self.use_texture_in_denoise and texture_mask is not None:
             if self.use_noise_map and noise_map is not None:
-                gate = nmp.apply_to_module(
-                    feat, self.denoise_gate, noise_map, texture_mask, feat.size(1)
+                denoise = nmp.apply_to_module(
+                    feat, self.denoise_path, noise_map, texture_mask, feat.size(1)
                 )
             else:
-                gate = nmp.apply_to_module(
-                    feat, self.denoise_gate, texture_mask=texture_mask, target_channels=feat.size(1)
+                denoise = nmp.apply_to_module(
+                    feat, self.denoise_path, texture_mask=texture_mask, target_channels=feat.size(1)
                 )
         else:
             if self.use_noise_map and noise_map is not None:
                 # Get denoising gate with adjusted noise map
-                gate = nmp.apply_to_module(
-                    feat, self.denoise_gate, noise_map=noise_map, target_channels=feat.size(1)
+                denoise = nmp.apply_to_module(
+                    feat, self.denoise_path, noise_map=noise_map, target_channels=feat.size(1)
                 )
             else:
                 # Get denoising gate without noise map
-                gate = self.denoise_gate(feat)
+                denoise = self.denoise_path(feat)
 
-        # Apply residual denoising with gating
-        denoise = self.residual_denoiser(feat, gate)
         nmp.detect_nan(denoise, "denoising path output")
 
         #--------------------------- DYNAMIC FUSION ---------------------------#
