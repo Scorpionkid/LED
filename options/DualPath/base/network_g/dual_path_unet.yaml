@@ -3,6 +3,7 @@ network_g:
   in_channels: 4
   out_channels: 4
   base_channels: 64
+  heads: [1, 2, 4, 8]
   dilated_rates: [1, 2, 4, 8]
   use_wavelet_upsample: true
   use_sharpness_recovery: true
@@ -23,7 +24,7 @@ network_g:
 
     # 动态融合参数
     fusion_texture_boost: 0.5    # 纹理区域细节增强因子
-    fusion_smooth_boost: 0.1     # 新增: 平滑区域去噪增强因子
+    # fusion_smooth_boost: 0.1     # 新增: 平滑区域去噪增强因子
 
     # 锐度恢复参数
     sharpness_texture_boost: 0.3  # 纹理区域锐化增强因子
@@ -33,7 +34,7 @@ network_g:
       window_sizes: [5, 9, 17]
       # base_lower_thresh: 0.01
       # base_upper_thresh: 0.1
-      base_lower_thresh: 0.008
-      base_upper_thresh: 0.05
+      # base_lower_thresh: 0.008
+      # base_upper_thresh: 0.05
       adaptive_thresh: true
       noise_sensitivity: 3.0        # 新增: 纹理检测对噪声的敏感度

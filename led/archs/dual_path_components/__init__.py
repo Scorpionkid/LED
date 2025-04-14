@@ -4,6 +4,8 @@ from .fusion import DynamicFusion
 from .sharpness_recovery import SharpnessRecovery, NoiseLevelNetwork
 from .wavelet_upsample import WaveletUpsample, DiscreteWaveletUpsample
 from .texture_detector import RAWTextureDetector
+from .enhanced_denoies_path import EnhancedDenoisePath
+from .enhanced_detail_path import EnhancedDetailPath
 
 __all__ = [
     'DilatedConvChain', 'HighFrequencyAttention', 'SobelFilter',
@@ -11,5 +13,6 @@ __all__ = [
     'DynamicFusion',
     'SharpnessRecovery', 'NoiseLevelNetwork',
     'WaveletUpsample', 'DiscreteWaveletUpsample',
-    'RAWTextureDetector'
+    'RAWTextureDetector',
+    'EnhancedDenoisePath','EnhancedDetailPath'
 ]

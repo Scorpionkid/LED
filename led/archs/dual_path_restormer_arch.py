@@ -2,372 +2,343 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from led.utils.registry import ARCH_REGISTRY
-
-from .dual_path_restormer_components import EnhancedDetailPath, EnhancedDenoisePath, EnhancedFusion
-from .dual_path_components import SharpnessRecovery, DiscreteWaveletUpsample, RAWTextureDetector
 import led.utils.noise_map_processor as nmp
 
-class DualPathRestormerBlock(nn.Module):
-    """双路径Restormer块
 
-    结合增强的细节路径和降噪路径
-    """
+from .dual_path_components import (
+    DilatedConvChain, HighFrequencyAttention,
+    AdaptiveDenoiseGate, ResidualDenoiser,
+    DynamicFusion,
+    WaveletUpsample, SharpnessRecovery, DiscreteWaveletUpsample,
+    RAWTextureDetector,
+    EnhancedDenoisePath, EnhancedDetailPath
+)
 
-    def __init__(self, in_channels, out_channels, num_heads=1, use_noise_map=False,
+class DualPathBlock(nn.Module):
+    """double path block, including detail path and denoising path"""
+    def __init__(self, in_channels, out_channels, use_noise_map=False,
                 use_texture_in_detail=False,
                 use_texture_in_denoise=False,
                 use_texture_in_fusion=False,
-                texture_params=None):
-        """初始化
+                texture_params=None, heads=1):
+        super(DualPathBlock, self).__init__()
 
-        Args:
-            in_channels: 输入通道数
-            out_channels: 输出通道数
-            num_heads: 注意力头数
-            use_noise_map: 是否使用噪声图
-            use_texture_in_detail: 细节路径是否使用纹理掩码
-            use_texture_in_denoise: 降噪路径是否使用纹理掩码
-            use_texture_in_fusion: 融合层是否使用纹理掩码
-            texture_params: 纹理相关参数
-        """
-        super(DualPathRestormerBlock, self).__init__()
-
-        # 特征提取
-        self.features = nn.Conv2d(in_channels, out_channels, 3, padding=1, bias=False)
+        # shared feature extraction
+        self.features = nn.Conv2d(in_channels, out_channels, 3, padding=1)
         self.activation = nn.LeakyReLU(0.2, inplace=True)
 
-        # 纹理参数
         texture_params = texture_params or {}
         texture_gate = texture_params.get('texture_gate', 0.5)
         texture_suppress_factor = texture_params.get('texture_suppress_factor', 0.7)
         fusion_texture_boost = texture_params.get('fusion_texture_boost', 0.5)
 
-        # 细节路径
-        self.detail_path = EnhancedDetailPath(
-            out_channels,
-            num_heads=num_heads,
-            use_noise_map=use_noise_map and use_texture_in_detail
-        )
+        # detail path
+        # self.detail_path = nn.Sequential(
+        #     DilatedConvChain(out_channels),
+        #     HighFrequencyAttention(out_channels, use_noise_map, use_texture_in_detail, texture_gate=texture_gate)
+        # )
+        num_heads = heads
+        self.detail_path = EnhancedDetailPath(out_channels, num_heads, use_noise_map)
 
-        # 降噪路径
-        self.denoise_path = EnhancedDenoisePath(
-            out_channels,
-            use_noise_map=use_noise_map and use_texture_in_denoise,
-            texture_suppress_factor=texture_suppress_factor
-        )
+        # denoising path gate mechanism
+        # self.denoise_gate = AdaptiveDenoiseGate(out_channels, use_noise_map, use_texture_in_denoise, texture_suppress_factor=texture_suppress_factor)
 
-        # 融合层
-        self.fusion = EnhancedFusion(
-            out_channels,
-            use_noise_map=use_noise_map and use_texture_in_fusion,
-            use_texture_mask=use_texture_in_fusion,
-            fusion_texture_boost=fusion_texture_boost
-        )
+        # denoising path residual learning
+        # self.residual_denoiser = ResidualDenoiser(out_channels)
+        self.denoise_path = EnhancedDenoisePath(out_channels, use_noise_map)
 
-        # 设置标志
+        # dynamic fusion layer
+        self.fusion = DynamicFusion(out_channels, use_noise_map, use_texture_in_fusion, fusion_texture_boost=fusion_texture_boost)
+
         self.use_noise_map = use_noise_map
         self.use_texture_in_detail = use_texture_in_detail
         self.use_texture_in_denoise = use_texture_in_denoise
         self.use_texture_in_fusion = use_texture_in_fusion
 
     def forward(self, x, noise_map=None, texture_mask=None):
-        """前向传播
 
-        Args:
-            x: 输入特征 [B, C, H, W]
-            noise_map: 可选的噪声图 [B, 1, H, W]
-            texture_mask: 可选的纹理掩码 [B, 1, H, W]
+        # Check for NaN values in the input
+        nmp.detect_nan(x, "DualPathBlock input")
 
-        Returns:
-            处理后的特征 [B, C, H, W]
-        """
-        # 检查输入是否有NaN
-        nmp.detect_nan(x, "DualPathRestormerBlock input")
+        # Check noise map for NaN values if provided
+        if noise_map is not None:
+            nmp.detect_nan(noise_map, "DualPathBlock noise map")
 
-        # 特征提取
+        # shared feature extraction
         feat = self.features(x)
         feat = self.activation(feat)
 
-        # 细节路径
-        detail_input = feat
-        detail_noise = noise_map if self.use_noise_map and self.use_texture_in_detail else None
-        detail_texture = texture_mask if self.use_texture_in_detail else None
-        detail = self.detail_path(detail_input, detail_noise)
+        #----------------------------- DETAIL PATH -----------------------------#
 
-        # 降噪路径
-        denoise_input = feat
-        denoise_noise = noise_map if self.use_noise_map and self.use_texture_in_denoise else None
-        denoise_texture = texture_mask if self.use_texture_in_denoise else None
-        denoise = self.denoise_path(denoise_input, denoise_noise, denoise_texture)
+        if self.use_texture_in_detail and texture_mask is not None:
+            if self.use_noise_map and noise_map is not None:
+                detail = nmp.apply_to_module(
+                    feat, self.detail_path, noise_map, texture_mask
+                )
+            else:
+                detail = nmp.apply_to_module(
+                    feat, self.detail_path, texture_mask=texture_mask
+                )
+        else:
+            if self.use_noise_map and noise_map is not None:
+                # detail = self.detail_path[0](feat)
+                # detail = nmp.apply_to_module(
+                #     detail, self.detail_path[-1], noise_map
+                # )
+                detail = nmp.apply_to_module(
+                    feat, self.detail_path, noise_map
+                )
+            else:
+                detail = self.detail_path(feat)
+        nmp.detect_nan(detail, "detail path output")
 
-        # 融合
-        fusion_noise = noise_map if self.use_noise_map and self.use_texture_in_fusion else None
-        fusion_texture = texture_mask if self.use_texture_in_fusion else None
-        output = self.fusion(detail, denoise, feat, fusion_noise, fusion_texture)
+        #--------------------------- DENOISING PATH ---------------------------#
 
+        # Compute adaptive gating mechanism
+        if self.use_texture_in_denoise and texture_mask is not None:
+            if self.use_noise_map and noise_map is not None:
+                denoise = nmp.apply_to_module(
+                    feat, self.denoise_path, noise_map, texture_mask
+                )
+            else:
+                denoise = nmp.apply_to_module(
+                    feat, self.denoise_path, texture_mask=texture_mask
+                )
+        else:
+            if self.use_noise_map and noise_map is not None:
+                # Get denoising gate with adjusted noise map
+                denoise = nmp.apply_to_module(
+                    feat, self.denoise_path, noise_map
+                )
+            else:
+                # Get denoising gate without noise map
+                denoise = self.denoise_path(feat)
+
+        # Apply residual denoising with gating
+        # denoise = self.residual_denoiser(feat, gate)
+        nmp.detect_nan(denoise, "denoising path output")
+
+        #--------------------------- DYNAMIC FUSION ---------------------------#
+        # Fuse outputs from both paths using content-aware mechanism
+        if self.use_texture_in_fusion and texture_mask is not None:
+            if self.use_noise_map and noise_map is not None:
+                fusion_func = lambda d, n, t: self.fusion(d, denoise, feat, n, t)
+                output = nmp.apply_to_module(
+                    detail, fusion_func, noise_map, texture_mask, feat.size(1)
+                )
+            else:
+                fusion_func = lambda d, t: self.fusion(d, denoise, feat, None, t)
+                output = nmp.apply_to_module(
+                    detail, fusion_func, texture_mask=texture_mask, target_channels=feat.size(1)
+                )
+        else:
+            if self.use_noise_map and noise_map is not None:
+                fusion_func = lambda d, n: self.fusion(d, denoise, feat, n, None)
+                output = nmp.apply_to_module(
+                    detail, fusion_func, noise_map=noise_map, target_channels=feat.size(1)
+                )
+            else:
+                output = self.fusion(detail, denoise, feat)
+
+        nmp.detect_nan(output, "fusion output")
         return output
 
 @ARCH_REGISTRY.register()
-class DualPathRestormer(nn.Module):
-    """双路径Restormer架构
-
-    结合双路径设计和Restormer组件的图像恢复网络
-    """
-
-    def __init__(self, in_channels=4, out_channels=4, base_channels=64,
+class DualPathUNet(nn.Module):
+    """double path U-Net, apply double path design on each scale of U-Net"""
+    def __init__(self, in_channels=4, out_channels=4, base_channels=64, heads=[1,2,4,8],
                  dilated_rates=None, use_wavelet_upsample=True,
                  use_sharpness_recovery=True, use_noise_map=False,
-                 use_texture_detection=False,
+                 use_texture_detection=False,  # 总开关，为了向后兼容
                  use_texture_in_detail=None,
                  use_texture_in_denoise=None,
                  use_texture_in_fusion=None,
                  use_texture_in_recovery=None,
                  texture_params=None):
-        """初始化
-
-        Args:
-            in_channels: 输入通道数
-            out_channels: 输出通道数
-            base_channels: 基础通道数
-            dilated_rates: 空洞卷积膨胀率
-            use_wavelet_upsample: 是否使用小波上采样
-            use_sharpness_recovery: 是否使用锐度恢复
-            use_noise_map: 是否使用噪声图
-            use_texture_detection: 是否使用纹理检测
-            use_texture_in_detail: 细节路径是否使用纹理
-            use_texture_in_denoise: 降噪路径是否使用纹理
-            use_texture_in_fusion: 融合是否使用纹理
-            use_texture_in_recovery: 锐度恢复是否使用纹理
-            texture_params: 纹理相关参数
-        """
-        super(DualPathRestormer, self).__init__()
+        super(DualPathUNet, self).__init__()
 
         self.base_channels = base_channels
         self.use_noise_map = use_noise_map
         self.use_wavelet_upsample = use_wavelet_upsample
         self.use_sharpness_recovery = use_sharpness_recovery
 
-        # 纹理检测相关
         self.use_texture_detection = use_texture_detection
         self.use_texture_in_detail = use_texture_in_detail if use_texture_in_detail is not None else use_texture_detection
         self.use_texture_in_denoise = use_texture_in_denoise if use_texture_in_denoise is not None else use_texture_detection
         self.use_texture_in_fusion = use_texture_in_fusion if use_texture_in_fusion is not None else use_texture_detection
         self.use_texture_in_recovery = use_texture_in_recovery if use_texture_in_recovery is not None else use_texture_detection
 
-        # 输入投影
-        self.conv_first = nn.Conv2d(in_channels, base_channels, kernel_size=3, padding=1, bias=False)
+        # enc1_in_channels = in_channels * 2 if use_noise_map else in_channels
+        enc1_in_channels = in_channels
 
-        # 纹理检测器
+        # texture_detector
+        self.texture_params = {
+            'texture_gate': 0.5,
+            'texture_suppress_factor': 0.7,
+            'fusion_texture_boost': 0.5,
+            'sharpness_texture_boost': 0.3,
+        }
         if use_texture_detection:
-            self.texture_params = {
-                'texture_gate': 0.5,
-                'texture_suppress_factor': 0.7,
-                'fusion_texture_boost': 0.5,
-                'sharpness_texture_boost': 0.3,
-            }
+
             if texture_params is not None:
                 self.texture_params.update(texture_params)
 
-            # 纹理检测器参数
+            # texture_detector params
             texture_detector_params = texture_params.get('texture_detector_params', {})
 
             window_sizes = texture_detector_params.get('window_sizes', [5, 9, 17])
+            # base_lower_thresh = texture_detector_params.get('base_lower_thresh', 0.05)
+            # base_upper_thresh = texture_detector_params.get('base_upper_thresh', 0.2)
             adaptive_thresh = texture_detector_params.get('adaptive_thresh', True)
-            noise_sensitivity = texture_detector_params.get('noise_sensitivity', 3.0)
+            noise_sensitivity = texture_detector_params.get('noise_sensitivity', 3.0)  # 新增
 
             self.texture_detector = RAWTextureDetector(
                 window_sizes=window_sizes,
+                # base_lower_thresh=base_lower_thresh,
+                # base_upper_thresh=base_upper_thresh,
                 adaptive_thresh=adaptive_thresh,
                 raw_channels=in_channels,
                 noise_sensitivity=noise_sensitivity
             )
 
-        # 编码器
-        self.encoders = nn.ModuleList([
-            DualPathRestormerBlock(base_channels, base_channels, num_heads=1,
-                                 use_noise_map=use_noise_map,
-                                 use_texture_in_detail=self.use_texture_in_detail,
-                                 use_texture_in_denoise=self.use_texture_in_denoise,
-                                 use_texture_in_fusion=self.use_texture_in_fusion,
-                                 texture_params=self.texture_params),
-            DualPathRestormerBlock(base_channels, base_channels*2, num_heads=2,
-                                 use_noise_map=use_noise_map,
-                                 use_texture_in_detail=self.use_texture_in_detail,
-                                 use_texture_in_denoise=self.use_texture_in_denoise,
-                                 use_texture_in_fusion=self.use_texture_in_fusion,
-                                 texture_params=self.texture_params),
-            DualPathRestormerBlock(base_channels*2, base_channels*4, num_heads=4,
-                                 use_noise_map=use_noise_map,
-                                 use_texture_in_detail=self.use_texture_in_detail,
-                                 use_texture_in_denoise=self.use_texture_in_denoise,
-                                 use_texture_in_fusion=self.use_texture_in_fusion,
-                                 texture_params=self.texture_params)
-        ])
+        # encoder
+        self.enc1 = DualPathBlock(enc1_in_channels, base_channels, use_noise_map, self.use_texture_in_detail, self.use_texture_in_denoise, self.use_texture_in_fusion, self.texture_params, heads[0])
+        self.enc2 = DualPathBlock(base_channels, base_channels*2, use_noise_map, self.use_texture_in_detail, self.use_texture_in_denoise, self.use_texture_in_fusion, self.texture_params, heads[1])
+        self.enc3 = DualPathBlock(base_channels*2, base_channels*4, use_noise_map, self.use_texture_in_detail, self.use_texture_in_denoise, self.use_texture_in_fusion, self.texture_params, heads[2])
 
-        # 瓶颈层
-        self.bottleneck = DualPathRestormerBlock(base_channels*4, base_channels*8, num_heads=8,
-                                              use_noise_map=use_noise_map,
-                                              use_texture_in_detail=self.use_texture_in_detail,
-                                              use_texture_in_denoise=self.use_texture_in_denoise,
-                                              use_texture_in_fusion=self.use_texture_in_fusion,
-                                              texture_params=self.texture_params)
+        # bottleneck
+        self.bottleneck = DualPathBlock(base_channels*4, base_channels*8, use_noise_map, self.use_texture_in_detail, self.use_texture_in_denoise, self.use_texture_in_fusion, self.texture_params, heads[3])
 
-        # 解码器
-        self.decoders = nn.ModuleList([
-            DualPathRestormerBlock(base_channels*8, base_channels*4, num_heads=4,
-                                 use_noise_map=use_noise_map,
-                                 use_texture_in_detail=self.use_texture_in_detail,
-                                 use_texture_in_denoise=self.use_texture_in_denoise,
-                                 use_texture_in_fusion=self.use_texture_in_fusion,
-                                 texture_params=self.texture_params),
-            DualPathRestormerBlock(base_channels*4, base_channels*2, num_heads=2,
-                                 use_noise_map=use_noise_map,
-                                 use_texture_in_detail=self.use_texture_in_detail,
-                                 use_texture_in_denoise=self.use_texture_in_denoise,
-                                 use_texture_in_fusion=self.use_texture_in_fusion,
-                                 texture_params=self.texture_params),
-            DualPathRestormerBlock(base_channels*2, base_channels, num_heads=1,
-                                 use_noise_map=use_noise_map,
-                                 use_texture_in_detail=self.use_texture_in_detail,
-                                 use_texture_in_denoise=self.use_texture_in_denoise,
-                                 use_texture_in_fusion=self.use_texture_in_fusion,
-                                 texture_params=self.texture_params)
-        ])
+        # decoder with skip connections
+        self.dec3 = DualPathBlock(base_channels*4+base_channels*4, base_channels*4, use_noise_map, self.use_texture_in_detail, self.use_texture_in_denoise, self.use_texture_in_fusion, self.texture_params, heads[2])
+        self.dec2 = DualPathBlock(base_channels*2+base_channels*2, base_channels*2, use_noise_map, self.use_texture_in_detail, self.use_texture_in_denoise, self.use_texture_in_fusion, self.texture_params, heads[1])
+        self.dec1 = DualPathBlock(base_channels+base_channels, base_channels, use_noise_map, self.use_texture_in_detail, self.use_texture_in_denoise, self.use_texture_in_fusion, self.texture_params, heads[0])
 
-        # 下采样
+        # downsample and upsample
         self.down = nn.MaxPool2d(2)
+        self.up3 = nn.ConvTranspose2d(base_channels*8, base_channels*4, 2, stride=2)
+        self.up2 = nn.ConvTranspose2d(base_channels*4, base_channels*2, 2, stride=2)
 
-        # 上采样
-        self.ups = nn.ModuleList([
-            nn.ConvTranspose2d(base_channels*8, base_channels*4, 2, stride=2),
-            nn.ConvTranspose2d(base_channels*4, base_channels*2, 2, stride=2),
-        ])
-
-        # 最终上采样，可选小波上采样
+        # final upsample, with optional wavelet upsample
         if use_wavelet_upsample:
-            self.up_final = DiscreteWaveletUpsample(base_channels*2, base_channels)
+            self.up1 = DiscreteWaveletUpsample(base_channels*2, base_channels)
         else:
-            self.up_final = nn.ConvTranspose2d(base_channels*2, base_channels, 2, stride=2)
+            self.up1 = nn.ConvTranspose2d(base_channels*2, base_channels, 2, stride=2)
 
-        # 精炼阶段
-        self.refine = DualPathRestormerBlock(base_channels, base_channels, num_heads=1,
-                                           use_noise_map=use_noise_map,
-                                           use_texture_in_detail=self.use_texture_in_detail,
-                                           use_texture_in_denoise=self.use_texture_in_denoise,
-                                           use_texture_in_fusion=self.use_texture_in_fusion,
-                                           texture_params=self.texture_params)
+        # output layer
+        self.final = nn.Conv2d(base_channels, out_channels, 1)
 
-        # 输出层
-        self.conv_last = nn.Conv2d(base_channels, out_channels, 1, bias=False)
-
-        # 锐度恢复
+        # sharpness recovery
         if use_sharpness_recovery:
-            self.sharpness_recovery = SharpnessRecovery(
-                out_channels,
-                use_noise_map=use_noise_map,
-                use_texture_mask=self.use_texture_in_recovery,
-                sharpness_texture_boost=texture_params.get('sharpness_texture_boost', 0.3) if texture_params else 0.3
-            )
+            self.sharpness_recovery = SharpnessRecovery(out_channels, use_noise_map, self.use_texture_in_recovery, sharpness_texture_boost=texture_params.get('sharpness_texture_boost', 0.3))
 
     def forward(self, x, noise_map=None, texture_mask=None):
-        """前向传播
-
-        Args:
-            x: 输入图像 [B, in_channels, H, W]
-            noise_map: 可选的噪声图 [B, 1, H, W]
-            texture_mask: 可选的纹理掩码 [B, 1, H, W]
-
-        Returns:
-            恢复的图像 [B, out_channels, H, W]
-            纹理掩码 [B, 1, H, W] 或 None
-        """
-        # 检查输入
+        # print("\n==== DUALPATHNET FORWARD ====")
         nmp.detect_nan(x, "input image")
 
-        if noise_map is not None:
-            nmp.detect_nan(noise_map, "input noise map")
-
-        # 纹理检测
-        computed_texture_mask = None
         if self.use_texture_detection:
             computed_texture_mask = self.texture_detector(x, noise_map)
             if texture_mask is None:
                 texture_mask = computed_texture_mask
+            texture_mask = nmp.standardize_map(texture_mask)
+            nmp.detect_nan(texture_mask, "纹理掩码")
 
-            nmp.detect_nan(texture_mask, "texture mask")
-
-            # 创建多尺度纹理掩码
-            texture_maps = nmp.create_multiscale_maps(
-                texture_mask, scales=[1, 2, 4, 8]
+            texture_masks = nmp.create_multiscale_maps(
+                texture_mask, scales=[1, 2, 4, 6]
             )
-
-        # 创建多尺度噪声图
-        if self.use_noise_map and noise_map is not None:
-            noise_maps = nmp.create_multiscale_maps(
-                noise_map, scales=[1, 2, 4, 8]
-            )
+            texture_masks = {
+                'original': texture_masks['scale_1'],
+                'down1': texture_masks['scale_2'],
+                'down2': texture_masks['scale_4'],
+                'down3': texture_masks['scale_6']
+            }
         else:
-            noise_maps = {k: None for k in [f'scale_{i}' for i in [1, 2, 4, 8]]}
+            texture_mask = None
+            texture_masks = {k: None for k in ['original', 'down1', 'down2', 'down3']}
 
-        # 初始特征提取
-        feat = self.conv_first(x)
+        # concatenate noise map if needed
+        if self.use_noise_map and noise_map is not None:
+            # noise map for different size
+            noise_map = nmp.standardize_map(noise_map)
+            noise_maps = nmp.create_multiscale_maps(
+                noise_map, scales=[1, 2, 4, 6]
+            )
+            noise_maps = {
+                'original': noise_maps['scale_1'],
+                'down1': noise_maps['scale_2'],
+                'down2': noise_maps['scale_4'],
+                'down3': noise_maps['scale_6']
+            }
+            # x_input = torch.cat([x, noise_map], dim=1)
+            x_input = x
+        else:
+            # print("Not using noise maps or noise_map is None")
+            noise_maps = {k: None for k in ['original', 'down1', 'down2', 'down3']}
+            x_input = x
 
-        # 编码器阶段
-        encoder_feats = []
+        # print(f"x_input shape: {x_input.shape}")
 
-        # 第一层编码器
-        enc1 = self.encoders[0](feat, noise_maps['scale_1'],
-                               texture_maps['scale_1'] if self.use_texture_detection else None)
-        encoder_feats.append(enc1)
+        #--------------------------- ENCODER PATH ---------------------------#
 
-        # 第二层编码器
+        # [1, 4/8, 1024, 1024] -> [1, 64, 1024, 1024]
+        enc1 = nmp.apply_to_module(
+            x_input, self.enc1, noise_maps['original'], texture_masks['original']
+        )
+        # [1, 64, 1024, 1024] -> [1, 128, 512, 512]
         enc1_down = self.down(enc1)
-        enc2 = self.encoders[1](enc1_down, noise_maps['scale_2'],
-                               texture_maps['scale_2'] if self.use_texture_detection else None)
-        encoder_feats.append(enc2)
-
-        # 第三层编码器
+        enc2 = nmp.apply_to_module(
+            enc1_down, self.enc2, noise_maps['down1'], texture_masks['down1']
+        )
+        # [1, 128, 512, 512] -> [1, 256, 256, 256]
         enc2_down = self.down(enc2)
-        enc3 = self.encoders[2](enc2_down, noise_maps['scale_4'],
-                               texture_maps['scale_4'] if self.use_texture_detection else None)
-        encoder_feats.append(enc3)
+        enc3 = nmp.apply_to_module(
+            enc2_down, self.enc3, noise_maps['down2'], texture_masks['down2']
+        )
 
-        # 瓶颈层
+        #--------------------------- BOTTLENECK ---------------------------#
+
+        # [1, 256, 256, 256] -> [1, 512, 128, 128]
         enc3_down = self.down(enc3)
-        bottleneck = self.bottleneck(enc3_down, noise_maps['scale_8'],
-                                   texture_maps['scale_8'] if self.use_texture_detection else None)
+        bottleneck = nmp.apply_to_module(
+            enc3_down, self.bottleneck, noise_maps['down3'], texture_masks['down3']
+        )
+        nmp.detect_nan(bottleneck, "bottleneck")
 
-        # 解码器阶段
-        # 第一层解码器
-        bottleneck_up = self.ups[0](bottleneck)
-        dec3_cat = torch.cat([bottleneck_up, encoder_feats[-1]], dim=1)
-        dec3 = self.decoders[0](dec3_cat, noise_maps['scale_4'],
-                               texture_maps['scale_4'] if self.use_texture_detection else None)
+        #--------------------------- DECODER PATH ---------------------------#
 
-        # 第二层解码器
-        dec3_up = self.ups[1](dec3)
-        dec2_cat = torch.cat([dec3_up, encoder_feats[-2]], dim=1)
-        dec2 = self.decoders[1](dec2_cat, noise_maps['scale_2'],
-                               texture_maps['scale_2'] if self.use_texture_detection else None)
+        # [1, 512, 128, 128] -> [[1, 256, 256, 256]] + [1, 256, 256, 256] -> [1, 256, 256, 256]
+        bottleneck_up = self.up3(bottleneck)
+        dec3_input = torch.cat([bottleneck_up, enc3], dim=1)
+        dec3 = nmp.apply_to_module(
+            dec3_input, self.dec3, noise_maps['down2'], texture_masks['down2']
+        )
+        # [1, 256, 256, 256] -> [1, 128, 512, 512]
+        dec3_up = self.up2(dec3)
+        dec2_input = torch.cat([dec3_up, enc2], dim=1)
+        dec2 = nmp.apply_to_module(
+            dec2_input, self.dec2, noise_maps['down1'], texture_masks['down1']
+        )
+        # [1, 128, 512, 512] -> [1, 64, 1024, 1024]
+        dec2_up = self.up1(dec2)
+        dec1_input = torch.cat([dec2_up, enc1], dim=1)
+        dec1 = nmp.apply_to_module(
+            dec1_input, self.dec1, noise_maps['original'], texture_masks['original']
+        )
 
-        # 第三层解码器
-        dec2_up = self.up_final(dec2)
-        dec1_cat = torch.cat([dec2_up, encoder_feats[-3]], dim=1)
-        dec1 = self.decoders[2](dec1_cat, noise_maps['scale_1'],
-                               texture_maps['scale_1'] if self.use_texture_detection else None)
+        #--------------------------- FINAL OUTPUT ---------------------------#
 
-        # 精炼阶段
-        refined = self.refine(dec1, noise_maps['scale_1'],
-                            texture_maps['scale_1'] if self.use_texture_detection else None)
+        out = self.final(dec1)
+        nmp.detect_nan(out, "final network output")
 
-        # 输出
-        out = self.conv_last(refined)
-
-        # 锐度恢复
+        # sharpness recovery
         if self.use_sharpness_recovery:
             if self.use_texture_in_recovery and computed_texture_mask is not None:
-                out = self.sharpness_recovery(out, noise_maps['scale_1'], texture_maps['scale_1'])
+                out = nmp.apply_to_module(
+                    out, self.sharpness_recovery, noise_maps['original'], texture_masks['original']
+                )
             else:
-                out = self.sharpness_recovery(out, noise_maps['scale_1'], None)
+                out = nmp.apply_to_module(
+                    out, self.sharpness_recovery, noise_maps['original']
+                )
 
-        return out, computed_texture_mask
+        return out, texture_mask
