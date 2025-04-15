@@ -6,8 +6,6 @@ import led.utils.noise_map_processor as nmp
 
 
 from .dual_path_components import (
-    DilatedConvChain, HighFrequencyAttention,
-    AdaptiveDenoiseGate, ResidualDenoiser,
     DynamicFusion,
     WaveletUpsample, SharpnessRecovery, DiscreteWaveletUpsample,
     RAWTextureDetector,
@@ -28,24 +26,15 @@ class DualPathBlock(nn.Module):
         self.activation = nn.LeakyReLU(0.2, inplace=True)
 
         texture_params = texture_params or {}
-        texture_gate = texture_params.get('texture_gate', 0.5)
+        texture_gate = texture_params.get('texture_gate', 0.3)
         texture_suppress_factor = texture_params.get('texture_suppress_factor', 0.7)
         fusion_texture_boost = texture_params.get('fusion_texture_boost', 0.5)
 
         # detail path
-        # self.detail_path = nn.Sequential(
-        #     DilatedConvChain(out_channels),
-        #     HighFrequencyAttention(out_channels, use_noise_map, use_texture_in_detail, texture_gate=texture_gate)
-        # )
         num_heads = heads
-        self.detail_path = EnhancedDetailPath(out_channels, num_heads, use_noise_map)
+        self.detail_path = EnhancedDetailPath(out_channels, num_heads, use_noise_map, use_texture_in_detail)
 
-        # denoising path gate mechanism
-        # self.denoise_gate = AdaptiveDenoiseGate(out_channels, use_noise_map, use_texture_in_denoise, texture_suppress_factor=texture_suppress_factor)
-
-        # denoising path residual learning
-        # self.residual_denoiser = ResidualDenoiser(out_channels)
-        self.denoise_path = EnhancedDenoisePath(out_channels, use_noise_map)
+        self.denoise_path = EnhancedDenoisePath(out_channels, use_noise_map, use_texture_in_denoise, use_mdta=True)
 
         # dynamic fusion layer
         self.fusion = DynamicFusion(out_channels, use_noise_map, use_texture_in_fusion, fusion_texture_boost=fusion_texture_boost)
@@ -81,10 +70,6 @@ class DualPathBlock(nn.Module):
                 )
         else:
             if self.use_noise_map and noise_map is not None:
-                # detail = self.detail_path[0](feat)
-                # detail = nmp.apply_to_module(
-                #     detail, self.detail_path[-1], noise_map
-                # )
                 detail = nmp.apply_to_module(
                     feat, self.detail_path, noise_map
                 )
@@ -115,7 +100,6 @@ class DualPathBlock(nn.Module):
                 denoise = self.denoise_path(feat)
 
         # Apply residual denoising with gating
-        # denoise = self.residual_denoiser(feat, gate)
         nmp.detect_nan(denoise, "denoising path output")
 
         #--------------------------- DYNAMIC FUSION ---------------------------#
@@ -144,7 +128,7 @@ class DualPathBlock(nn.Module):
         return output
 
 @ARCH_REGISTRY.register()
-class DualPathUNet(nn.Module):
+class DualPathUNet_E1(nn.Module):
     """double path U-Net, apply double path design on each scale of U-Net"""
     def __init__(self, in_channels=4, out_channels=4, base_channels=64, heads=[1,2,4,8],
                  dilated_rates=None, use_wavelet_upsample=True,
@@ -155,7 +139,7 @@ class DualPathUNet(nn.Module):
                  use_texture_in_fusion=None,
                  use_texture_in_recovery=None,
                  texture_params=None):
-        super(DualPathUNet, self).__init__()
+        super(DualPathUNet_E1, self).__init__()
 
         self.base_channels = base_channels
         self.use_noise_map = use_noise_map

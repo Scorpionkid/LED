@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from ..restormer_components.ne_gdfn import NoiseEnhancedGDFN as NE_GDFN
+from ..restormer_components.te_mdta import TextureEnhancedMDTA as TE_MDTA
 
 class AdaptiveDenoiseGate(nn.Module):
     """Adaptive gating mechanism to adjust denoising strength based on local noise characteristics"""
@@ -40,62 +41,73 @@ class AdaptiveDenoiseGate(nn.Module):
 
         return denoise_strength
 
-class ResidualDenoiser(nn.Module):
-    """Residual learning structure to learn noise residuals"""
+class EnhancedResidualDenoiser(nn.Module):
+    """改进的残差降噪器，融入GDFN的门控思想"""
     def __init__(self, channels):
-        super(ResidualDenoiser, self).__init__()
+        super(EnhancedResidualDenoiser, self).__init__()
+
+        # 保留原有结构
         self.conv1 = nn.Conv2d(channels, channels, 3, padding=1)
-        self.conv2 = nn.Conv2d(channels, channels, 3, padding=1)
+
+        # 引入门控机制（GDFN思想）- 替代原来的第二个卷积
+        self.content_conv = nn.Conv2d(channels, channels, 3, padding=1)
+        self.gate_conv = nn.Conv2d(channels, channels, 3, padding=1)
+
         self.activation = nn.ReLU(inplace=True)
 
     def forward(self, x, gate=None):
         """
         Args:
-            x: input features
-            gate: optional gating signal
+            x: 输入特征
+            gate: 可选的外部门控信号
         """
-        residual = self.activation(self.conv1(x))
-        residual = self.conv2(residual)
+        # 第一阶段与原来相同
+        features = self.activation(self.conv1(x))
 
+        # 分离门控特征和内容特征
+        content = self.content_conv(features)
+        internal_gate = torch.sigmoid(self.gate_conv(features))
+
+        # 内外门控结合
         if gate is not None:
-            # If gating signal is provided, adjust residual based on gating signal
-            return x + residual * gate
+            effective_gate = gate * internal_gate
         else:
-            return x + residual
+            effective_gate = internal_gate
+
+        # 应用残差连接
+        return x + content * effective_gate
 
 class EnhancedDenoisePath(nn.Module):
-    def __init__(self, channels, use_noise_map=False):
+    def __init__(self, channels, use_noise_map=False, use_texture_mask=False, use_mdta=True):
         super(EnhancedDenoisePath, self).__init__()
 
         # 保留原有的自适应门控
         self.gate = AdaptiveDenoiseGate(channels, use_noise_map)
 
-        # 新增：GDFN用于增强特征变换
-        self.gdfn = NE_GDFN(channels)
+        # 可选的MDTA全局上下文处理
+        self.use_mdta = use_mdta
+        if use_mdta:
+            # 简化版MDTA，仅用于去噪路径的上下文增强
+            self.pre_conv = nn.Conv2d(channels, channels, 1)
+            self.mdta = TE_MDTA(channels, num_heads=2)
+            self.post_conv = nn.Conv2d(channels, channels, 1)
 
-        # 保留原有的残差降噪器
-        self.residual_denoiser = ResidualDenoiser(channels)
+        # 使用改进的残差降噪器
+        self.residual_denoiser = EnhancedResidualDenoiser(channels)
 
     def forward(self, x, noise_map=None, texture_mask=None):
         # 生成自适应门控信号
-        denoise_strength = self.gate(x, noise_map, texture_mask)
+        denoise_strength = self.gate(x, noise_map)
 
-        # GDFN特征转换 - 增强降噪能力
-        gdfn_features = self.gdfn(x, noise_map)
-
-        # 结合GDFN与残差降噪
-        # 先应用残差降噪
-        residual_features = self.residual_denoiser(x)
-
-        # 根据噪声程度调整GDFN和残差特征的比例
-        if noise_map is not None:
-            # 高噪声区域更依赖GDFN
-            noise_weight = torch.sigmoid(3.0 * noise_map)
-            output = x + denoise_strength * (
-                gdfn_features * noise_weight + residual_features * (1 - noise_weight)
-            )
+        # 可选的全局上下文增强
+        if self.use_mdta:
+            mdta_in = self.pre_conv(x)
+            mdta_out = self.mdta(mdta_in, texture_mask)
+            context_enhanced = x + 0.2 * self.post_conv(mdta_out)
         else:
-            # 无噪声信息时平衡使用
-            output = x + denoise_strength * (gdfn_features * 0.5 + residual_features * 0.5)
+            context_enhanced = x
+
+        # 应用改进的残差降噪
+        output = self.residual_denoiser(context_enhanced, denoise_strength)
 
         return output

@@ -52,7 +52,7 @@ class DilatedConvChain(nn.Module):
         return res
 
 class EnhancedDetailPath(nn.Module):
-    def __init__(self, channels, num_heads=1, use_noise_map=False):
+    def __init__(self, channels, num_heads=1, use_noise_map=False, use_texture_mask=False):
         super(EnhancedDetailPath, self).__init__()
 
         # 保留原有的DilatedConvChain
@@ -81,12 +81,12 @@ class EnhancedDetailPath(nn.Module):
                 nn.Sigmoid()
             )
 
-    def forward(self, x, noise_map=None):
+    def forward(self, x, noise_map=None, texture_mask=None):
         # 空洞卷积链处理
         res = self.dilated_convs(x)
 
         # MDTA增强全局上下文
-        global_context = self.mdta(res)
+        global_context = self.mdta(res, texture_mask)
 
         # 边缘检测
         edge_map = self.edge_detector(x)
@@ -101,7 +101,6 @@ class EnhancedDetailPath(nn.Module):
             # 高噪声区域降低纹理敏感度
             attention = attention * (1.0 - noise_factor * 0.5)
 
-        # 最终输出 - 保留原有的注意力应用方式，但使用增强的全局上下文
-        output = x * attention + global_context
+        output = x * attention + x
 
         return output
