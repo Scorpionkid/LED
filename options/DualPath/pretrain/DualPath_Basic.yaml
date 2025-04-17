@@ -1,11 +1,12 @@
 base:
 - options/base/dataset/pretrain/SID_train.yaml        # train dataset
 - options/base/dataset/test/SID_SonyA7S2_val_split.yaml  # test dataset
-- options/DualPath/base/network_g/dual_path_unet.yaml  # network_g
+- options\DualPath\base\network_g\dual_path_unet_e1.yaml  # network_g
+# - options/DualPath/base/network_g/dual_path_unet.yaml  # network_g
 - options/base/noise_g/camera_params.yaml # camera_params
 - options/base/val_and_logger.yaml                     # val + logger
 
-name: DualPath_Pretrain_Basic
+name: DualPath_Pretrain_Basic_restormer_e1
 model_type: DualPathModel
 scale: 1
 num_gpu: 1

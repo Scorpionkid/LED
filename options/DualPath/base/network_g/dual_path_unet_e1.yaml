@@ -1,0 +1,40 @@
+network_g:
+  type: DualPathUNet_E1
+  in_channels: 4
+  out_channels: 4
+  base_channels: 64
+  heads: [1, 2, 4, 8]
+  dilated_rates: [1, 2, 4, 8]
+  use_wavelet_upsample: true
+  use_sharpness_recovery: true
+  use_noise_map: false
+  use_texture_detection: false
+  use_texture_in_detail: true   # 只在细节路径启用
+  use_texture_in_denoise: true # 去噪路径不启用
+  use_texture_in_fusion: false   # 在融合模块启用
+  use_texture_in_recovery: true # 在锐度恢复中不启用
+
+  texture_params:
+    # 高频注意力相关参数
+    texture_gate: 0.3           # 纹理门控因子
+
+    # 自适应去噪门控参数
+    texture_suppress_factor: 0.7 # 纹理区域降噪抑制因子
+    # texture_enhance_factor: 0.15  # 新增: 平滑区域降噪增强因子
+
+    # 动态融合参数
+    fusion_texture_boost: 0.5    # 纹理区域细节增强因子
+    # fusion_smooth_boost: 0.1     # 新增: 平滑区域去噪增强因子
+
+    # 锐度恢复参数
+    sharpness_texture_boost: 0.3  # 纹理区域锐化增强因子
+
+    # 纹理检测器参数
+    texture_detector_params:
+      window_sizes: [5, 9, 17]
+      # base_lower_thresh: 0.01
+      # base_upper_thresh: 0.1
+      # base_lower_thresh: 0.008
+      # base_upper_thresh: 0.05
+      adaptive_thresh: true
+      noise_sensitivity: 3.0        # 新增: 纹理检测对噪声的敏感度
