@@ -73,8 +73,9 @@ class RAWGTDataset(data.Dataset):
                         for i in range(1, self.patch_id_max + 1):
                             # patch name pattern
                             patch_suffix = self.patch_tplt.format(i)
+                            file_ext = ".ARW"
 
-                            pattern = osp.join(self.root_folder, f"{file_id}{patch_suffix}")
+                            pattern = osp.join(self.root_folder, f"{file_id}{patch_suffix}{file_ext}")
                             if self.postfix:
                                 pattern += f".{self.postfix}"
 

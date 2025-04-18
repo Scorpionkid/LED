@@ -7,6 +7,7 @@ from torch.cuda.amp import autocast, GradScaler
 
 from led.archs import build_network
 from led.losses import build_loss
+from led.data.noise_utils import VirtualNoisyPairGenerator, CalibratedNoisyPairGenerator
 from led.models.raw_base_model import RAWBaseModel
 from led.utils import get_root_logger
 from led.utils.registry import MODEL_REGISTRY
@@ -160,62 +161,6 @@ class DualPathModel(RAWBaseModel):
         self.value_monitor = ValueMonitor()
         self.value_monitor.register_hooks(self.net_g, prefix='net_g')
 
-        # 为锐度恢复模块添加特殊钩子（重点监控）
-        if hasattr(self.net_g, 'sharpness_recovery'):
-            def detailed_sharpness_hook(module, inputs, outputs):
-                if not hasattr(self, 'monitor_iter'):
-                    self.monitor_iter = 0
-                self.monitor_iter += 1
-
-                if self.monitor_iter % 10 == 0:  # 每10次迭代记录一次，避免过多日志
-                    with torch.no_grad():
-                        # 检查输入
-                        if isinstance(inputs, tuple) and len(inputs) > 0:
-                            input_tensor = inputs[0]
-                            input_stats = {
-                                'min': torch.min(input_tensor).item(),
-                                'max': torch.max(input_tensor).item(),
-                                'mean': torch.mean(input_tensor).item(),
-                                'std': torch.std(input_tensor).item(),
-                                'has_nan': torch.isnan(input_tensor).any().item(),
-                                'has_inf': torch.isinf(input_tensor).any().item()
-                            }
-
-                        # 检查输出
-                        output_stats = {
-                            'min': torch.min(outputs).item(),
-                            'max': torch.max(outputs).item(),
-                            'mean': torch.mean(outputs).item(),
-                            'std': torch.std(outputs).item(),
-                            'has_nan': torch.isnan(outputs).any().item(),
-                            'has_inf': torch.isinf(outputs).any().item()
-                        }
-
-                        # 检查是否有异常值
-                        if (output_stats['max'] > 2.0 or output_stats['has_nan']
-                            or output_stats['has_inf'] or input_stats['has_nan']
-                            or input_stats['has_inf']):
-
-                            print(f"\n[警告] 锐度恢复模块检测到异常值 (iter {self.monitor_iter}):")
-                            print(f"输入统计: {input_stats}")
-                            print(f"输出统计: {output_stats}")
-
-                            # 保存详细信息用于后续分析
-                            os.makedirs("debug/abnormal_values", exist_ok=True)
-                            torch.save({
-                                'iter': self.monitor_iter,
-                                'input': input_tensor.detach().cpu(),
-                                'output': outputs.detach().cpu(),
-                                'input_stats': input_stats,
-                                'output_stats': output_stats,
-                                'texture_mask': inputs[2].detach().cpu() if len(inputs) > 2 else None
-                            }, f"debug/abnormal_values/sharpness_abnormal_{self.monitor_iter}.pth")
-
-            # 注册详细的锐度恢复模块钩子
-            self.sharpness_hook = self.net_g.sharpness_recovery.register_forward_hook(
-                detailed_sharpness_hook
-            )
-
         # 创建调试目录
         os.makedirs("debug", exist_ok=True)
         print("模型监控系统已初始化，将监控所有模块的异常值")
@@ -275,8 +220,7 @@ class DualPathModel(RAWBaseModel):
         # print(f"Input lq shape: {self.lq.shape}")
         # print(f"Using use_noise_map: {self.use_noise_map}")
 
-        inputs = self._prepare_inputs(self.lq)
-
+        inputs = self._prepare_inputs(self.lq, training=True)
         if self.use_amp:
             with autocast():
                 if self.use_texture_detection:
@@ -391,8 +335,7 @@ class DualPathModel(RAWBaseModel):
     def test(self):
         """Forward function used in testing."""
         # noise map
-        inputs = self._prepare_inputs(self.lq)
-
+        inputs = self._prepare_inputs(self.lq, training=False)
         if hasattr(self, 'net_g_ema'):
             self.net_g_ema.eval()
             with torch.no_grad():
@@ -461,21 +404,31 @@ class DualPathModel(RAWBaseModel):
 
             # 情况2: 如果有噪声生成器，使用它生成噪声图和处理图像
             # 这部分通常在训练阶段使用
-            elif hasattr(self, 'noise_g') and self.training:
+            elif hasattr(self, 'noise_g') and training:
                 self.camera_id = torch.randint(0, len(self.noise_g), (1,)).item()
                 with torch.no_grad():
                     scale = self.white_level - self.black_level
                     self.gt = (self.gt - self.black_level) / scale
                     self.gt, self.lq, self.curr_metadata = self.noise_g(self.gt, scale, self.ratio, self.camera_id)
 
-                    if 'cam' in self.curr_metadata:
-                        self.camera_name = self.curr_metadata['cam']
+                    # if 'cam' in self.curr_metadata:
+                    #     self.camera_name = self.curr_metadata['cam']
 
-                    # 生成噪声图
-                    inputs['noise_map'] = self.generate_noise_map_from_metadata(self.lq, self.curr_metadata['noise_params'])
+                    if hasattr(self.noise_g, 'virtual_camera_count'):
+                        if 'vcam_id' in self.curr_metadata:
+                            self.camera_name = f"IC{self.curr_metadata['vcam_id']}"
+                        else:
+                            self.camera_name = f"IC{self.camera_id}"
+
+                    # 生成噪声图并作归一化
+                    noise_map = self.generate_noise_map_from_metadata(self.lq, self.curr_metadata['noise_params'])
+                    min_val = noise_map.min()
+                    max_val = noise_map.max()
+                    noise_map_normalized = (noise_map - min_val) / (max_val - min_val)
+                    inputs['noise_map'] = noise_map_normalized
 
                     # 更新输入的lq
-                    inputs['lq'] = self.lq
+                    inputs['x'] = self.lq
 
                     # 数据增强
                     if hasattr(self, 'augment') and self.augment is not None:
@@ -563,73 +516,87 @@ class DualPathModel(RAWBaseModel):
                     f"mean={values.mean():.4f}, std={values.std():.4f}, "
                     f"min={values.min():.4f}, max={values.max():.4f}")
 
-    def detect_gradient_explosion(self, loss, current_iter, loss_dict, threshold=100.0):
+    def detect_gradient_explosion(self, loss, current_iter, loss_dict, threshold=1.0, skip_update=True):
+        """检测梯度/损失异常并在分布式环境中同步决策
 
-        is_critical = torch.isnan(loss) or torch.isinf(loss)
-        is_high_loss = loss > threshold
+        Args:
+            loss (Tensor): 当前批次的总损失值
+            current_iter (int): 当前迭代次数
+            loss_dict (dict): 包含各损失组件的字典
+            threshold (float): 异常损失阈值
+            skip_update (bool): 是否跳过参数更新
 
-        if is_critical or is_high_loss:
+        Returns:
+            bool: 如果检测到异常且应该跳过更新，则返回True
+        """
+        if not hasattr(self, 'skipped_batches_count'):
+            self.skipped_batches_count = 0
+
+        is_critical_local = torch.tensor(1.0 if torch.isnan(loss) or torch.isinf(loss) else 0.0, device=self.device)
+        is_high_loss_local = torch.tensor(1.0 if loss > threshold else 0.0, device=self.device)
+
+        # 在分布式环境中同步异常状态
+        is_critical = is_critical_local.clone()
+        is_high_loss = is_high_loss_local.clone()
+        if self.opt.get('dist', False):
+            torch.distributed.all_reduce(is_critical, op=torch.distributed.ReduceOp.MAX)
+            torch.distributed.all_reduce(is_high_loss, op=torch.distributed.ReduceOp.MAX)
+
+        # 如果任何GPU检测到异常
+        if is_critical > 0.5 or is_high_loss > 0.5:
+            self.skipped_batches_count += 1
             logger = get_root_logger()
 
-            if is_critical:
-                error_msg = f"[!!!CRITICAL ERROR!!!] NaN/Inf loss detected: {loss.item()}, terminating training!"
+            if is_critical > 0.5:
                 log_func = logger.error
+                prefix = "[!!!CRITICAL ERROR!!!]"
             else:
-                error_msg = f"[WARNING] High loss value detected: {loss.item()}, possible gradient instability!"
                 log_func = logger.warning
+                prefix = "[WARNING]"
 
+            # 基本错误信息
+            rank = self.opt.get('rank', 0)
+            loss_value = loss.item() if not torch.isnan(loss) and not torch.isinf(loss) else "NaN/Inf"
+            error_msg = f"{prefix} GPU {rank}: {current_iter}次迭代: 异常损失值({loss_value:.4f})检测到, 所有GPU跳过此批次更新 [累计跳过: {self.skipped_batches_count}]"
             log_func(error_msg)
-            log_func(f"Current iteration: {current_iter}, Learning rate: {self.get_current_learning_rate()}")
 
-            # 检查纹理掩码
-            if hasattr(self, 'texture_mask') and self.texture_mask is not None:
-                mask_stats = {
-                    "mean": torch.mean(self.texture_mask).item(),
-                    "min": torch.min(self.texture_mask).item(),
-                    "max": torch.max(self.texture_mask).item(),
-                    "has_nan": torch.isnan(self.texture_mask).any().item()
-                }
-                log_func(f"Texture mask statistics: {mask_stats}")
+            # 详细诊断信息
+            if self.opt.get('rank', 0) == 0:  # 只在主进程打印详细信息
+                log_func(f"Current iter: {current_iter}, Learning rate: {self.get_current_learning_rate()}")
 
-                if mask_stats["mean"] > 0.6:
-                    log_func(f"Texture mask mean is too high: {mask_stats['mean']:.4f}")
+                # 检查纹理掩码
+                if hasattr(self, 'texture_mask') and self.texture_mask is not None:
+                    mask_stats = {
+                        "mean": torch.mean(self.texture_mask).item(),
+                        "min": torch.min(self.texture_mask).item(),
+                        "max": torch.max(self.texture_mask).item(),
+                        "has_nan": torch.isnan(self.texture_mask).any().item()
+                    }
+                    log_func(f"Texture mask statistics: {mask_stats}")
 
-            # 检查各损失组件
-            for loss_name, loss_value in loss_dict.items():
-                log_func(f"Loss component {loss_name}: {loss_value.item()}")
+                    if mask_stats["mean"] > 0.6:
+                        log_func(f"Texture mask mean is too high: {mask_stats['mean']:.4f}")
 
-            # 保存诊断信息
-            debug_state = {
-                'iter': current_iter,
-                'loss': loss.item(),
-                'loss_components': {k: v.item() for k, v in loss_dict.items()},
-                'output_stats': {
-                    'mean': torch.mean(self.output).item(),
-                    'min': torch.min(self.output).item(),
-                    'max': torch.max(self.output).item(),
-                    'has_nan': torch.isnan(self.output).any().item()
-                },
-                'gt_stats': {
-                    'mean': torch.mean(self.gt).item(),
-                    'min': torch.min(self.gt).item(),
-                    'max': torch.max(self.gt).item()
-                }
-            }
+                # 检查各损失组件
+                for loss_name, loss_value in loss_dict.items():
+                    val = loss_value.item() if not torch.isnan(loss_value) and not torch.isinf(loss_value) else "NaN/Inf"
+                    log_func(f"Loss component {loss_name}: {val}")
 
-            # 保存调试状态到文件
-            # debug_dir = os.path.join(self.opt['path']['experiments_root'], 'debug')
-            # os.makedirs(debug_dir, exist_ok=True)
+                # 检查跳过率
+                if current_iter > 0:
+                    skip_rate = self.skipped_batches_count / (current_iter + 1) * 100
+                    log_func(f"Skip rate: {skip_rate:.2f}%")
 
-            # if is_critical:
-            #     file_name = f'error_state_{current_iter}.pth'
-            # else:
-            #     file_name = f'warning_state_{current_iter}.pth'
+                    # 高跳过率警告
+                    if skip_rate > 5.0:
+                        log_func(f"⚠️ High Skip rate Warning: {skip_rate:.2f}% > 5%, possible instability!")
 
-            # torch.save(debug_state, os.path.join(debug_dir, file_name))
-
-            # 只在NaN/Inf时终止训练
-            if is_critical:
+            if is_critical > 0.5:
+                error_msg = f"{prefix} NaN/Inf loss detected, terminating training!"
+                log_func(error_msg)
                 raise RuntimeError(error_msg)
+
+            return skip_update
 
         return False
 
