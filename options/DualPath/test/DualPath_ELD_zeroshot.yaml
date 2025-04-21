@@ -1,0 +1,37 @@
+base:
+- options/base/dataset/test/ELD_SonyA7S2_val_split.yaml  # 测试数据集
+- options/DualPath/base/network_g/dual_path_unet_e1.yaml    # 网络架构
+- options/base/noise_g/camera_params.yaml
+- options/base/val_and_logger.yaml                       # 评估设置
+
+name: DualPath_Zeroshot_ELD_SonyA7S2
+model_type: DualPathModel
+scale: 1
+num_gpu: 1
+manual_seed: 2025
+
+network_g:
+  use_noise_map: true
+  use_texture_detection: true  # 保持与预训练模型相同的设置
+
+camera_name: SonyA7S2
+
+path:
+  pretrain_network_g: experiments/DualPath_Pretrain_Basic_restormer_e1_virtualNoise/models/net_g_196000.pth
+  strict_load_g: true
+  resume_state: ~
+  CRF: datasets/EMoR
+
+val:
+  val_freq: 1
+  save_img: true
+  metrics:
+    psnr:
+      type: calculate_psnr
+      crop_border: 2
+      test_y_channel: false
+    ssim:
+      type: calculate_ssim
+      crop_border: 2
+      test_y_channel: false
+  illumination_correct: true
