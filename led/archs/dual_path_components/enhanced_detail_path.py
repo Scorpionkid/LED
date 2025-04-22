@@ -52,7 +52,7 @@ class DilatedConvChain(nn.Module):
         return res
 
 class EnhancedDetailPath(nn.Module):
-    def __init__(self, channels, num_heads=1, use_noise_map=False, use_texture_mask=False):
+    def __init__(self, channels, num_heads=1):
         super(EnhancedDetailPath, self).__init__()
 
         # 保留原有的DilatedConvChain
@@ -71,15 +71,12 @@ class EnhancedDetailPath(nn.Module):
             nn.Sigmoid()
         )
 
-        # 噪声适应模块
-        self.use_noise_map = use_noise_map
-        if use_noise_map:
-            self.noise_modulation = nn.Sequential(
-                nn.Conv2d(1, channels//4, 1),
-                nn.LeakyReLU(0.2, inplace=True),
-                nn.Conv2d(channels//4, channels, 1),
-                nn.Sigmoid()
-            )
+        self.noise_modulation = nn.Sequential(
+            nn.Conv2d(1, channels//4, 1),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(channels//4, channels, 1),
+            nn.Sigmoid()
+        )
 
     def forward(self, x, noise_map=None, texture_mask=None):
         # 空洞卷积链处理

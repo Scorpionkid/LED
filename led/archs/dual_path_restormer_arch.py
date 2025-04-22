@@ -32,9 +32,9 @@ class DualPathBlock(nn.Module):
 
         # detail path
         num_heads = heads
-        self.detail_path = EnhancedDetailPath(out_channels, num_heads, use_noise_map, use_texture_in_detail)
+        self.detail_path = EnhancedDetailPath(out_channels, num_heads, use_noise_map)
 
-        self.denoise_path = EnhancedDenoisePath(out_channels, use_noise_map, use_texture_in_denoise, use_mdta=True)
+        self.denoise_path = EnhancedDenoisePath(out_channels, num_heads)
 
         # dynamic fusion layer
         self.fusion = DynamicFusion(out_channels, use_noise_map, use_texture_in_fusion, fusion_texture_boost=fusion_texture_boost)
