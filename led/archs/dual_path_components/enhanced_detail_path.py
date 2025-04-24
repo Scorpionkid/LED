@@ -71,13 +71,6 @@ class EnhancedDetailPath(nn.Module):
             nn.Sigmoid()
         )
 
-        self.noise_modulation = nn.Sequential(
-            nn.Conv2d(1, channels//4, 1),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(channels//4, channels, 1),
-            nn.Sigmoid()
-        )
-
     def forward(self, x, noise_map=None, texture_mask=None):
         # 空洞卷积链处理
         res = self.dilated_convs(x)
@@ -94,9 +87,9 @@ class EnhancedDetailPath(nn.Module):
 
         # 噪声自适应调整
         if self.use_noise_map and noise_map is not None:
-            noise_factor = self.noise_modulation(noise_map)
+            noise_factor = torch.sigmoid(4.0 * noise_map - 2.0)
             # 高噪声区域降低纹理敏感度
-            attention = attention * (1.0 - noise_factor * 0.5)
+            attention = attention * (1.0 - noise_factor)
 
         output = x * attention + x
 
