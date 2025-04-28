@@ -6,7 +6,7 @@ import led.utils.noise_map_processor as nmp
 
 
 from .dual_path_components import (
-    DynamicFusion,
+    DynamicFusion, AGF,
     WaveletUpsample, SharpnessRecovery, DiscreteWaveletUpsample,
     RAWTextureDetector,
     EnhancedDenoisePath, EnhancedDetailPath
@@ -37,7 +37,8 @@ class DualPathBlock(nn.Module):
         self.denoise_path = EnhancedDenoisePath(out_channels, num_heads)
 
         # dynamic fusion layer
-        self.fusion = DynamicFusion(out_channels, use_noise_map, use_texture_in_fusion, fusion_texture_boost=fusion_texture_boost)
+        self.fusion = AGF(out_channels, use_noise_map, use_texture_in_fusion)
+        # self.fusion = DynamicFusion(out_channels, use_noise_map, use_texture_in_fusion, fusion_texture_boost=fusion_texture_boost)
 
         self.use_noise_map = use_noise_map
         self.use_texture_in_detail = use_texture_in_detail
